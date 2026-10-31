@@ -2,7 +2,7 @@ import { db } from "@/db";
 import { productCatalog } from "@/db/schema";
 import type { EvidenceSource, ProviderCall, ReportFinding, RetailLink } from "@/lib/types";
 import { CATALOG_SEED, matchCatalog, type CatalogEntry } from "@/lib/identifiers/catalog";
-import { inspectBarcode, inspectImei, looksLikeModelNumber, normalizeModel } from "@/lib/identifiers/checksums";
+import { inspectBarcode, inspectImei, modelCodesInText, normalizeModel } from "@/lib/identifiers/checksums";
 import { aiStructured } from "@/lib/providers/ai";
 import { SCAM_SIGNALS } from "@/lib/verification/lexicon";
 import { StepTimer, extractPrices, type ModuleInput, type ModuleOutput } from "@/lib/verification/module";
@@ -17,7 +17,7 @@ import { newId, round, truncate } from "@/lib/utils";
  * physical *authenticity* (which no database can decide).
  */
 
-const SERIAL_RE = /\b(?=[A-Z0-9]{7,17}\b)(?=.*[A-Z])(?=.*\d)[A-Z0-9]{7,17}\b/g;
+const SERIAL_RE = /\b(?=[A-Z0-9]*[A-Z])(?=[A-Z0-9]*\d)[A-Z0-9]{7,17}\b/g;
 
 const PRICE_FLOOR: Record<string, number> = {
   Smartphone: 130, Laptop: 260, Charger: 9, "Audio accessory": 40,
@@ -25,22 +25,39 @@ const PRICE_FLOOR: Record<string, number> = {
 };
 
 interface SpecAttribute {
-  key: string;
   label: string;
+  /** Catalogue spec fields that document this attribute; other fields are never read ("10Gb/s" is not storage). */
+  fields: string[];
+  /** Captures the claimed number (1) and, where units differ, the unit (2). */
   inputRe: RegExp;
+  /** Captures a number or slash list "8/16/24" (1) and, where units differ, the unit (2). */
   catalogRe: RegExp;
-  unit: string;
+  /** Converts units to a common base so "1 TB" equals "1024 GB" and "1.24 kg" equals "1240 g". */
+  scale?: Record<string, number>;
+  /** Accepts any value inside a documented range ("256 GB – 2 TB") or above a documented minimum ("from 1.12 kg"). */
+  ranged?: boolean;
 }
 
 const SPEC_ATTRIBUTES: SpecAttribute[] = [
-  { key: "display", label: "Display size", inputRe: /(\d{1,2}(?:\.\d)?)\s*(?:inch|inches|"|″)/i, catalogRe: /(\d{1,2}(?:\.\d)?)\s*in\b/i, unit: "inches" },
-  { key: "battery", label: "Battery capacity", inputRe: /(\d{3,5})\s*(?:mah)/i, catalogRe: /(\d{3,5})\s*mah/i, unit: "mAh" },
-  { key: "ram", label: "Memory", inputRe: /(\d{1,2})\s*gb\s*(?:ram|memory|lpddr)/i, catalogRe: /(\d{1,2})\s*gb\b/i, unit: "GB RAM" },
-  { key: "storage", label: "Storage", inputRe: /(\d{2,4})\s*(gb|tb)\s*(?:storage|rom|ssd|nvme)?/i, catalogRe: /(\d{2,4})\s*(?:gb|tb)\b/i, unit: "storage" },
-  { key: "camera", label: "Main camera", inputRe: /(\d{2,3})\s*mp/i, catalogRe: /(\d{2,3})\s*mp/i, unit: "MP" },
-  { key: "weight", label: "Weight", inputRe: /(\d{2,4}(?:\.\d)?)\s*(g|kg)\b/i, catalogRe: /(\d{2,4}(?:\.\d)?)\s*(g|kg)\b/i, unit: "weight" },
-  { key: "charging", label: "Charging power", inputRe: /(\d{2,3})\s*w\b/i, catalogRe: /(\d{2,3})\s*w\b/i, unit: "watts" },
+  { label: "Display size", fields: ["display"], inputRe: /(?<![\d.])(\d{1,2}(?:\.\d)?)[\s-]*(?:inch|inches|"|″)/i, catalogRe: /(?<![\d.])(\d{1,2}(?:\.\d)?)\s*in\b/i },
+  { label: "Battery capacity", fields: ["battery"], inputRe: /(?<![\d.])(\d{3,5})\s*mah\b/i, catalogRe: /(?<![\d.])(\d{3,5})\s*mah\b/i },
+  { label: "Memory", fields: ["memory", "ram"], inputRe: /(?<![\d.])(\d{1,2})\s*gb\s*(?:ram|memory|lpddr)/i, catalogRe: /(?<![\d.])(\d{1,2}(?:\s*\/\s*\d{1,2})*)\s*gb\b/i },
+  { label: "Storage", fields: ["storage"], inputRe: /(?<![\d.])(\d{2,4}|\d(?=\s*tb))\s*(gb|tb)\b(?!\s*(?:ram|memory|lpddr|unified))/i, catalogRe: /(?<![\d.])(\d{1,4}(?:\s*\/\s*\d{1,4})*)\s*(gb|tb)\b/i, scale: { gb: 1, tb: 1024 }, ranged: true },
+  { label: "Main camera", fields: ["camera"], inputRe: /(?<![\d.])(\d{2,3})\s*mp\b/i, catalogRe: /(?<![\d.])(\d{2,3})\s*mp\b/i },
+  { label: "Weight", fields: ["weight"], inputRe: /(?<![\d.])(\d{2,4}(?:\.\d{1,2})?|\d(?:\.\d{1,2})?(?=\s*kg))\s*(kg|g)\b/i, catalogRe: /(?<![\d.])(\d{1,4}(?:\.\d{1,2})?)\s*(kg|g)\b/i, scale: { g: 1, kg: 1000 }, ranged: true },
+  { label: "Charging power", fields: ["charging", "output"], inputRe: /(?<![\d.])(\d{2,3})\s*w\b/i, catalogRe: /(?<![\d.])(\d{2,3})\s*w\b/i },
 ];
+
+/** "1.86–2.0 kg" → "1.86 kg–2.0 kg", so the first end of a range keeps its unit. */
+const RANGE_UNIT_RE = /(\d+(?:\.\d+)?)\s*([–—]|-(?=\s*\d)|\bto\b)\s*(\d+(?:\.\d+)?)\s*([a-z]+)/gi;
+
+/** Every number `re` finds in `text`, slash lists expanded, converted to the attribute's base unit. */
+function specValues(text: string, re: RegExp, scale?: Record<string, number>): number[] {
+  return [...text.replace(RANGE_UNIT_RE, "$1 $4$2$3 $4").matchAll(new RegExp(re.source, "gi"))].flatMap((m) => {
+    const factor = scale?.[(m[2] ?? "").toLowerCase()] ?? 1;
+    return m[1].split("/").map((n) => Math.round(Number.parseFloat(n) * factor * 1000) / 1000);
+  });
+}
 
 async function loadCatalog(): Promise<{ entries: CatalogEntry[]; fromDb: boolean }> {
   try {
@@ -101,10 +118,9 @@ export async function verifyProduct(input: ModuleInput): Promise<ModuleOutput> {
       .filter((s) => !ctx.imei.value?.includes(s) && s !== ctx.barcode.value);
     ctx.serial = serials[0] ?? null;
     ctx.model = (() => {
-      const explicit = text.match(/(?:model|model\s*(?:no|number|#)|type)\s*[:#]?\s*([A-Z0-9][A-Z0-9\/.\-\s]{2,24})/i);
+      const explicit = text.match(/(?:model|model\s*(?:no|number|#)|type)\s*[:#]?\s*([A-Z0-9][A-Z0-9/.\-\s]{2,24})/i);
       if (explicit?.[1]) return explicit[1].trim();
-      const tokens = text.split(/[\s,;|]+/).filter((t) => t.length >= 4 && t.length <= 24 && looksLikeModelNumber(t));
-      return tokens[0] ?? null;
+      return modelCodesInText(text)[0] ?? null;
     })();
 
     const found = [
@@ -211,26 +227,30 @@ export async function verifyProduct(input: ModuleInput): Promise<ModuleOutput> {
   await timer.run("Cross-check claimed specifications", "Compare numbers in the submission against the matched record.", async () => {
     const entry = ctx.matched?.entry;
     if (!entry) return "skipped";
-    const catalogText = Object.entries(entry.specs).map(([k, v]) => `${k}: ${v}`).join(" | ");
     let contradictions = 0;
     let confirmations = 0;
 
     for (const attr of SPEC_ATTRIBUTES) {
       const inputMatch = text.match(attr.inputRe);
       if (!inputMatch) continue;
-      const claimed = inputMatch[1];
-      const catalogMatches = [...catalogText.matchAll(new RegExp(attr.catalogRe, "gi"))].map((m) => m[1]);
-      if (!catalogMatches.length) continue;
-      const agreed = catalogMatches.some((c) => Number.parseFloat(c) === Number.parseFloat(claimed));
-      if (agreed) {
+      const documentedText = attr.fields.map((f) => entry.specs[f]).filter(Boolean).join(" · ");
+      const documented = specValues(documentedText, attr.catalogRe, attr.scale);
+      if (!documented.length) continue;
+      const claimedText = inputMatch[0].trim();
+      const [claimed] = specValues(claimedText, attr.inputRe, attr.scale);
+      const lowest = Math.min(...documented);
+      const inRange = Boolean(attr.ranged) && claimed >= lowest && (
+        (documented.length >= 2 && /[–—…-]|\bto\b/.test(documentedText) && claimed <= Math.max(...documented))
+        || /\bfrom\b/i.test(documentedText));
+      if (documented.includes(claimed) || inRange) {
         confirmations += 1;
         findings.push(makeFinding("specs", `${attr.label} agrees with the official record`,
-          `Submitted ${claimed} ${attr.unit}; ${entry.brand} ${entry.model} is documented with ${catalogMatches.join(" / ")} ${attr.unit}.`,
+          `Submitted ${claimedText}; ${entry.brand} ${entry.model} is documented with ${documentedText}.`,
           "positive", 0.45));
       } else {
         contradictions += 1;
         findings.push(makeFinding("specs", `${attr.label} contradicts the official record`,
-          `Submitted ${claimed} ${attr.unit}, but ${entry.brand} ${entry.model} is documented as ${catalogMatches.join(" / ")} ${attr.unit}. A specification that the manufacturer never shipped is a strong counterfeit indicator.`,
+          `Submitted ${claimedText}, but ${entry.brand} ${entry.model} is documented as ${documentedText}. A specification that the manufacturer never shipped is a strong counterfeit indicator.`,
           "risk", 0.9));
       }
     }

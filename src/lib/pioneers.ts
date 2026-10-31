@@ -9,19 +9,13 @@
  * switch source.
  */
 
-export type Pioneer = {
-  name: string;
-  role: string;
-  photo: string;
-};
+import type { Pioneer, PioneersPayload } from "@/lib/types";
+import { afterResponse } from "@/lib/request-scope";
+import { setting } from "@/lib/settings";
 
-export type PioneersPayload = {
-  source: string;
-  fetchedAt: string;
-  pioneers: Pioneer[];
-};
+export type { Pioneer, PioneersPayload };
 
-export const PIONEERS_SOURCE_URL = process.env.PIONEERS_SOURCE_URL ?? "https://mistralbrain.com/";
+export const PIONEERS_SOURCE_URL = setting("PIONEERS_SOURCE_URL") ?? "https://mistralbrain.com/";
 const REVALIDATE_SECONDS = 600;
 const MAX_PIONEERS = 24;
 
@@ -74,14 +68,34 @@ export function parsePioneers(html: string, base: string): Pioneer[] {
   return pioneers;
 }
 
+// Parsed pioneers are cached for REVALIDATE_SECONDS: in this isolate's memory (always), and in
+// Cloudflare's edge cache (shared by the data centre; active on a custom domain, not workers.dev).
+let memo: { at: number; payload: PioneersPayload } | null = null;
+const CACHE_KEY = `https://sg16identifier.com/__cache/pioneers?source=${encodeURIComponent(PIONEERS_SOURCE_URL)}`;
+
 export async function fetchLivePioneers(): Promise<PioneersPayload> {
+  if (memo && Date.now() - memo.at < REVALIDATE_SECONDS * 1000) return memo.payload;
+  const cached = await caches.default.match(CACHE_KEY).catch(() => undefined);
+  if (cached) {
+    const payload = (await cached.json()) as PioneersPayload;
+    memo = { at: Date.now(), payload };
+    return payload;
+  }
+  const payload = await readSource();
+  memo = { at: Date.now(), payload };
+  afterResponse(
+    caches.default.put(CACHE_KEY, Response.json(payload, { headers: { "cache-control": `public, max-age=${REVALIDATE_SECONDS}` } })),
+  );
+  return payload;
+}
+
+async function readSource(): Promise<PioneersPayload> {
   const res = await fetch(PIONEERS_SOURCE_URL, {
     signal: AbortSignal.timeout(10000),
     headers: {
       "user-agent": "Mozilla/5.0 (compatible; SG16-Identifier/1.0; +https://sg16identifier.com/bot)",
       accept: "text/html",
     },
-    next: { revalidate: REVALIDATE_SECONDS },
   });
   if (!res.ok) throw new Error(`Pioneers source answered HTTP ${res.status}`);
 

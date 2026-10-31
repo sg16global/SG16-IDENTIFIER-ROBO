@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from "node:crypto";
+import { latin1, randomBytes, sha256Hex, toHex } from "@/lib/utils";
 
 /**
  * Upload hardening (blueprint §8): the client-declared MIME type is never
@@ -16,9 +16,8 @@ export interface SniffResult {
 
 export function sniffMagicBytes(bytes: Uint8Array): SniffResult {
   if (bytes.length < 12) return { ok: false, reason: "File too small to identify" };
-  const hex = Buffer.from(bytes.subarray(0, 16)).toString("hex");
-  const ascii = (start: number, len: number) =>
-    Buffer.from(bytes.subarray(start, start + len)).toString("latin1");
+  const hex = toHex(bytes.subarray(0, 16));
+  const ascii = (start: number, len: number) => latin1(bytes.subarray(start, start + len));
 
   if (hex.startsWith("ffd8ff")) return { ok: true, kind: "jpeg", mime: "image/jpeg" };
   if (hex.startsWith("89504e470d0a1a0a")) return { ok: true, kind: "png", mime: "image/png" };
@@ -38,10 +37,10 @@ export function sniffMagicBytes(bytes: Uint8Array): SniffResult {
   };
 }
 
-export function validateUpload(
+export async function validateUpload(
   declaredType: string,
   bytes: Uint8Array,
-): { ok: true; kind: string; mime: string; internalName: string; sha256: string } | { ok: false; reason: string } {
+): Promise<{ ok: true; kind: string; mime: string; internalName: string; sha256: string } | { ok: false; reason: string }> {
   if (bytes.length > MAX_UPLOAD_BYTES) {
     return { ok: false, reason: `File exceeds the ${MAX_UPLOAD_BYTES / 1024 / 1024} MB limit` };
   }
@@ -55,11 +54,9 @@ export function validateUpload(
     // Recorded, not fatal: browsers frequently send generic types.
   }
 
-  const sha256 = createHash("sha256").update(bytes).digest("hex");
-  const internalName = `sg16/${sha256.slice(0, 2)}/${sha256.slice(2, 10)}-${randomBytes(4).toString("hex")}.${sniff.kind === "jpeg" ? "jpg" : sniff.kind}`;
+  const sha256 = await sha256Hex(bytes);
+  const internalName = `sg16/${sha256.slice(0, 2)}/${sha256.slice(2, 10)}-${toHex(randomBytes(4))}.${sniff.kind === "jpeg" ? "jpg" : sniff.kind}`;
   return { ok: true, kind: sniff.kind, mime: sniff.mime, internalName, sha256 };
 }
 
-export function sha256Hex(input: string | Uint8Array): string {
-  return createHash("sha256").update(input).digest("hex");
-}
+export { sha256Hex };

@@ -1,9 +1,7 @@
-"use client";
-
-import Image from "next/image";
+import { Img } from "@/components/img";
 import { useEffect, useRef, useState } from "react";
 import { fetchPioneers } from "@/components/pioneers-section";
-import type { Pioneer } from "@/lib/pioneers";
+import type { Pioneer } from "@/lib/types";
 import { pageHasUserActivation, speak, useRobotMuted, useRobotSpeaking, writeMuted } from "@/lib/robot-voice";
 
 /**
@@ -286,11 +284,11 @@ export function RoboManager({ className = "" }: { className?: string }) {
             <div className="robo__float">
               <div className="robo__breathe">
                 {/* Blurred copy of the robot: a glow that follows its own neon outline. */}
-                <Image {...IMAGE} alt="" sizes={SIZES} className="robo__bloom" />
-                <Image {...IMAGE} alt="" sizes={SIZES} preload className="robo__img robo__img--body" />
+                <Img {...IMAGE} alt="" sizes={SIZES} className="robo__bloom" />
+                <Img {...IMAGE} alt="" sizes={SIZES} preload className="robo__img robo__img--body" />
                 <div className="robo__head">
                   <div className="robo__head-motion">
-                    <Image {...IMAGE} alt="" sizes={SIZES} preload className="robo__img robo__img--head" />
+                    <Img {...IMAGE} alt="" sizes={SIZES} preload className="robo__img robo__img--head" />
                     {showEyes && (
                       <span key={`${state}-${tone}`} className="robo__eyes">
                         <span className="robo__eye robo__eye--left" />

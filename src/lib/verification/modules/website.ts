@@ -147,17 +147,17 @@ export async function verifyWebsite(input: ModuleInput): Promise<ModuleOutput> {
     return "done";
   });
 
-  await timer.run("TLS certificate inspection", "Read the certificate actually presented on port 443.", async () => {
+  await timer.run("TLS certificate inspection", "Read the host's current certificate from Certificate Transparency logs.", async () => {
     if (!hostname || !input.flags.dnsEnabled) return "skipped";
     ctx.tls = await collectTlsProfile(hostname);
     if (ctx.tls.unsupported) {
       // Not evidence about the site either way: record the gap, not a warning.
-      limitations.push("The certificate's issuer, age and trust chain could not be inspected in this deployment's runtime.");
+      limitations.push(`The certificate's issuer, age and trust chain could not be inspected (${ctx.tls.error}).`);
       return "skipped";
     }
     if (!ctx.tls.ok) {
       findings.push(makeFinding("tls", "No usable TLS certificate",
-        `The server did not present a readable certificate (${ctx.tls.error}). Browsers would show a security warning.`,
+        `No currently valid certificate from a publicly trusted authority was found (${ctx.tls.error}). Browsers would show a security warning.`,
         "warning", 0.5));
       return "done";
     }

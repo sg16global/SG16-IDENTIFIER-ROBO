@@ -26,7 +26,7 @@ export interface ImeiResult {
 }
 
 export function inspectImei(input: string): ImeiResult {
-  const match = input.replace(/[\s-]/g, "").match(/\b(\d{15})\b/);
+  const match = input.replace(/[\s-]/g, "").match(/(?:^|\D)(\d{15})(?:\D|$)/);
   if (!match) return { found: false };
   const value = match[1];
   const valid = luhnValid(value);
@@ -169,5 +169,16 @@ export function looksLikeModelNumber(input: string): boolean {
   const t = input.trim();
   if (t.length < 4 || t.length > 32) return false;
   if (!/[A-Za-z]/.test(t) || !/\d/.test(t)) return false;
-  return /^(?:[A-Z]{1,5}[-\s]?)?[A-Z0-9][A-Z0-9\/.\-\s]{2,28}[A-Z0-9]$/i.test(t);
+  return /^(?:[A-Z]{1,5}[-\s]?)?[A-Z0-9][A-Z0-9/.\-\s]{2,28}[A-Z0-9]$/i.test(t);
+}
+
+/** A number followed by a short unit or suffix ("256GB", "5000mAh", "45W", "1990s") — a quantity, not a model code. */
+const QUANTITY_RE = /^\d+(?:\.\d+)?[a-z]{0,4}$/i;
+
+/** Tokens inside free text that have the shape of a manufacturer model code ("SM-S928B/DS", "A2147"). */
+export function modelCodesInText(text: string): string[] {
+  return text
+    .split(/[\s,;|]+/)
+    .map((t) => t.replace(/^[("'[]+|[)"'\].,:;!?]+$/g, ""))
+    .filter((t) => t.length >= 4 && t.length <= 24 && looksLikeModelNumber(t) && !QUANTITY_RE.test(t));
 }

@@ -1,34 +1,48 @@
-// Cloudflare Workers deployment for SG16 Identifier (OpenNext adapter).
-// Build: npm run build:worker   Local Workers preview: npm run preview   Deploy: npm run deploy
+// SG16 Identifier on Cloudflare Workers: the Vite + React single-page app as static assets,
+// served and backed by the Worker in src/worker/index.ts (API, page metadata, image resizing).
+// Dev: npm run dev   Local production preview: npm run preview   Deploy: npm run deploy
+// `vite build` writes the deployable config to dist/; `wrangler deploy` picks it up automatically.
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
 	"name": "sg16-identifier",
-	"main": ".open-next/worker.js",
-	// workerd 1.20261023 is installed; newer dates need a newer Wrangler.
+	"main": "./src/worker/index.ts",
 	"compatibility_date": "2026-10-23",
-	// nodejs_compat provides the Node APIs the app uses (crypto, dns, net, tls, Buffer)
-	// and lets `pg` reach PostgreSQL over TCP.
+	// nodejs_compat is needed by the PostgreSQL driver (pg), as Cloudflare documents for Hyperdrive,
+	// and provides AsyncLocalStorage. App code imports no node:fs/dns/tls/net.
 	"compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
 	"assets": {
-		"directory": ".open-next/assets",
-		"binding": "ASSETS"
+		// Filled from Vite's client build at build time.
+		"binding": "ASSETS",
+		// Unknown paths still load the app (it renders its own not-found page).
+		"not_found_handling": "single-page-application",
+		// Page and API URLs go to the Worker first (metadata, 404 status, API). Built assets,
+		// public files and, in `vite dev`, Vite's own module URLs are served directly.
+		"run_worker_first": ["/*", "!/assets/*", "!/src/*", "!/node_modules/*", "!/@*"]
 	},
-	"services": [
-		{
-			// Self-reference required by OpenNext; must match "name" above.
-			"binding": "WORKER_SELF_REFERENCE",
-			"service": "sg16-identifier"
-		}
-	],
-	// next/image optimisation (header logo, Robo Manager). Without this binding
-	// Cloudflare serves the 1.4 MB and 2.1 MB originals.
+	// Image resizing and AVIF/WebP for /api/image (header logo, Robo Manager).
 	"images": {
 		"binding": "IMAGES"
 	},
+	// Rate limits and the daily budget, shared by every Worker instance (src/worker/guard.ts).
+	"durable_objects": {
+		"bindings": [{ "name": "GUARD", "class_name": "GuardState" }]
+	},
+	"migrations": [{ "tag": "v1", "new_sqlite_classes": ["GuardState"] }],
 	"observability": {
 		"enabled": true
-	}
-	// Secrets (DATABASE_URL, ADMIN_ACCESS_CODE, provider API keys) are set with
-	// `npx wrangler secret put <NAME>`, never written here. Plain settings from
-	// .env.example can go in a "vars" block.
+	},
+	// Plain-text (non-secret) operator settings. ADMIN_EMAIL is the contact shown
+	// in the admin console — it is never a credential.
+	"vars": {
+		"ADMIN_EMAIL": "sg16global@gmail.com"
+	},
+	// Optional bindings the app detects at runtime:
+	//   "hyperdrive": [{ "binding": "HYPERDRIVE", "id": "<id from `npx wrangler hyperdrive create`>" }]
+	//       Pools PostgreSQL connections at the edge; used instead of DATABASE_URL when bound.
+	//   "ai": { "binding": "AI" }
+	//       Workers AI for the universal API (model ids "workers-ai/@cf/..."). It always calls
+	//       Cloudflare's network, so `npm run dev` then needs `npx wrangler login`.
+	//
+	// Secrets (DATABASE_URL, ADMIN_ACCESS_CODE, VITEX_GATEWAY_KEYS, provider API keys) are set
+	// with `npx wrangler secret put <NAME>`, never written here; .dev.vars holds them locally.
 }

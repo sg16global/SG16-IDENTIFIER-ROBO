@@ -1,9 +1,9 @@
-import dns from "node:dns/promises";
-import tls from "node:tls";
+import { DnsError, resolveCname, resolveMx, resolveNs, resolveSoa, resolveTxt } from "@/lib/security/doh";
 import type { EvidenceSource, ProviderCall } from "@/lib/types";
 import { disabled, meter } from "@/lib/providers/registry";
 import { assertPublicResolution, parseUntrustedUrl, safeFetch } from "@/lib/security/url-guard";
 import { foldHomoglyphs } from "@/lib/identifiers/checksums";
+import { setting } from "@/lib/settings";
 
 /** Website & scam intelligence adapters (blueprint §5). */
 
@@ -69,32 +69,30 @@ export async function collectDnsProfile(hostname: string): Promise<DnsProfile> {
     txt: [],
     errors: [],
   };
-  const resolver = new dns.Resolver({ timeout: 4000, tries: 1 });
-
   const resolution = await assertPublicResolution(hostname);
   profile.addresses = resolution.addresses;
   if (!resolution.ok) profile.errors.push(resolution.reason ?? "resolution failed");
 
   const attempts: Array<[string, () => Promise<void>]> = [
     ["SOA", async () => {
-      const soa = await resolver.resolveSoa(profile.registrableDomain);
+      const soa = await resolveSoa(profile.registrableDomain);
       profile.soa = { nsname: soa.nsname, hostmaster: soa.hostmaster, serial: soa.serial, refresh: soa.refresh };
     }],
-    ["NS", async () => { profile.nameServers = await resolver.resolveNs(profile.registrableDomain); }],
+    ["NS", async () => { profile.nameServers = await resolveNs(profile.registrableDomain); }],
     ["MX", async () => {
-      const mx = await resolver.resolveMx(profile.registrableDomain);
+      const mx = await resolveMx(profile.registrableDomain);
       profile.mx = mx.map((m) => `${m.priority} ${m.exchange}`);
     }],
     ["TXT", async () => {
-      const txt = await resolver.resolveTxt(profile.registrableDomain);
+      const txt = await resolveTxt(profile.registrableDomain);
       profile.txt = txt.map((parts) => parts.join(""));
       profile.spf = profile.txt.find((t) => t.startsWith("v=spf1"));
     }],
     ["DMARC", async () => {
-      const dmarc = await resolver.resolveTxt(`_dmarc.${profile.registrableDomain}`);
+      const dmarc = await resolveTxt(`_dmarc.${profile.registrableDomain}`);
       profile.dmarc = dmarc.map((p) => p.join("")).find((t) => t.startsWith("v=DMARC1"));
     }],
-    ["CNAME", async () => { profile.cname = await resolver.resolveCname(hostname); }],
+    ["CNAME", async () => { profile.cname = await resolveCname(hostname); }],
   ];
 
   await Promise.all(
@@ -102,7 +100,7 @@ export async function collectDnsProfile(hostname: string): Promise<DnsProfile> {
       try {
         await fn();
       } catch (error) {
-        const code = (error as NodeJS.ErrnoException).code ?? "";
+        const code = error instanceof DnsError ? error.code : "";
         profile.errors.push(`${label}: ${code || (error as Error).message}`);
       }
     }),
@@ -120,59 +118,154 @@ export interface TlsProfile {
   selfSigned?: boolean;
   sanCount?: number;
   error?: string;
-  /** The runtime cannot read peer certificates at all (says nothing about the site). */
+  /** The certificate source could not be consulted (says nothing about the site). */
   unsupported?: boolean;
 }
 
-// Cloudflare Workers' node:tls opens connections but exposes no peer certificate
-// (no getPeerCertificate, no rejectUnauthorized: false).
-const TLS_INSPECTION_SUPPORTED = !(typeof navigator !== "undefined" && navigator.userAgent === "Cloudflare-Workers");
+/*
+ * Certificate details come from Certificate Transparency (crt.sh), not a TLS
+ * handshake: Workers cannot read a peer certificate, but browsers accept a
+ * publicly trusted certificate only if it is logged in CT, so the host's
+ * currently valid certificate (issuer, subject, validity, names) is read from
+ * the logs. A host with no valid logged certificate is one browsers would warn
+ * about. If the CT service cannot be reached, that is a gap in this check —
+ * reported as `unsupported` — not evidence about the site.
+ */
+const CRTSH_ENDPOINT = "https://crt.sh/";
+const CERTSPOTTER_ENDPOINT = "https://api.certspotter.com/v1/issuances";
+const CT_TIMEOUT_MS = 5000;
+const CT_USER_AGENT = "Mozilla/5.0 (compatible; SG16-Identifier/1.0; +https://sg16identifier.com/bot)";
+const CT_MAX_BYTES = 4 * 1024 * 1024;
+const CT_MEMO_MS = 60 * 60 * 1000;
+const ctMemo = new Map<string, { at: number; profile: TlsProfile }>();
 
-export async function collectTlsProfile(hostname: string, port = 443): Promise<TlsProfile> {
-  if (!TLS_INSPECTION_SUPPORTED) {
-    return { ok: false, unsupported: true, error: "This runtime (Cloudflare Workers) cannot read server certificates." };
-  }
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => resolve({ ok: false, error: "TLS handshake timed out after 6s" }), 6000);
-    try {
-      const socket = tls.connect({ host: hostname, port, servername: hostname, rejectUnauthorized: false }, () => {
-        clearTimeout(timer);
-        try {
-          const cert = socket.getPeerCertificate();
-          const validFrom = cert.valid_from ? new Date(cert.valid_from) : undefined;
-          const validTo = cert.valid_to ? new Date(cert.valid_to) : undefined;
-          const issuerO = String((cert.issuer as any)?.O ?? (cert.issuer as any)?.CN ?? "unknown");
-          const subjectCN = String((cert.subject as any)?.CN ?? hostname);
-          const san = (cert.subjectaltname ?? "").split(",").filter(Boolean);
-          const profile: TlsProfile = {
-            ok: true,
-            issuer: issuerO,
-            subject: subjectCN,
-            validFrom: validFrom?.toISOString(),
-            validTo: validTo?.toISOString(),
-            ageDays: validFrom ? Math.round((Date.now() - validFrom.getTime()) / 86400000) : undefined,
-            selfSigned: socket.getPeerCertificate(true)?.issuerCertificate?.fingerprint ===
-              socket.getPeerCertificate(true)?.fingerprint ||
-              /self[-\s]?signed|localhost|^CN=/i.test(issuerO) && issuerO === subjectCN,
-            sanCount: san.length,
-          };
-          socket.destroy();
-          resolve(profile);
-        } catch (error) {
-          socket.destroy();
-          resolve({ ok: false, error: (error as Error).message });
-        }
-      });
-      socket.on("error", (error) => {
-        clearTimeout(timer);
-        socket.destroy();
-        resolve({ ok: false, error: (error as Error).message });
-      });
-    } catch (error) {
-      clearTimeout(timer);
-      resolve({ ok: false, error: (error as Error).message });
-    }
+interface CtEntry {
+  issuer_name?: string;
+  common_name?: string;
+  name_value?: string;
+  not_before?: string;
+  not_after?: string;
+}
+
+function dnField(dn: string | undefined, key: "O" | "CN"): string | undefined {
+  const value = dn?.match(new RegExp(`(?:^|,\\s*)${key}=("[^"]*"|[^,]*)`))?.[1];
+  return value?.replace(/^"|"$/g, "").trim() || undefined;
+}
+
+/** crt.sh timestamps are UTC without a zone designator. */
+function ctTime(value: string | undefined): number | undefined {
+  if (!value) return undefined;
+  const ms = Date.parse(/[zZ]$|[+-]\d\d:?\d\d$/.test(value) ? value : `${value}Z`);
+  return Number.isNaN(ms) ? undefined : ms;
+}
+
+function ctNames(entry: CtEntry): string[] {
+  return [...new Set((entry.name_value ?? "").split("\n").map((n) => n.trim().toLowerCase()).filter(Boolean))];
+}
+
+async function readCtJson(url: string, service: string, headers: Record<string, string> = {}): Promise<unknown[]> {
+  const res = await fetch(url, {
+    signal: AbortSignal.timeout(CT_TIMEOUT_MS),
+    headers: { accept: "application/json", "user-agent": CT_USER_AGENT, ...headers },
   });
+  if (!res.ok) throw new Error(`${service} responded ${res.status}`);
+  const text = await res.text();
+  if (text.length > CT_MAX_BYTES) throw new Error(`${service} returned more than can be inspected`);
+  const parsed: unknown = JSON.parse(text || "[]");
+  return Array.isArray(parsed) ? parsed : [];
+}
+
+/** crt.sh: one query per identity (the host, and the wildcard that would cover it). */
+async function crtshEntries(identities: string[]): Promise<CtEntry[]> {
+  const lists = await Promise.all(
+    identities.map((identity) =>
+      readCtJson(`${CRTSH_ENDPOINT}?q=${encodeURIComponent(identity)}&output=json&exclude=expired&deduplicate=Y`, "crt.sh"),
+    ),
+  );
+  return lists.flat() as CtEntry[];
+}
+
+/** Cert Spotter (SSLMate): unexpired issuances for the host, wildcards included. Set CERTSPOTTER_API_KEY for a higher quota. */
+async function certspotterEntries(host: string): Promise<CtEntry[]> {
+  const key = setting("CERTSPOTTER_API_KEY");
+  const url = `${CERTSPOTTER_ENDPOINT}?domain=${encodeURIComponent(host)}&match_wildcards=true&expand=dns_names&expand=issuer`;
+  const issuances = (await readCtJson(url, "Cert Spotter", key ? { authorization: `Bearer ${key}` } : {})) as Array<{
+    dns_names?: string[];
+    issuer?: { name?: string };
+    not_before?: string;
+    not_after?: string;
+  }>;
+  return issuances.map((i) => ({
+    issuer_name: i.issuer?.name,
+    common_name: i.dns_names?.[0],
+    name_value: (i.dns_names ?? []).join("\n"),
+    not_before: i.not_before,
+    not_after: i.not_after,
+  }));
+}
+
+function ctFailure(error: unknown): string {
+  const name = (error as { name?: string }).name;
+  return name === "TimeoutError" || name === "AbortError" ? `no answer within ${CT_TIMEOUT_MS / 1000}s` : (error as Error).message;
+}
+
+export async function collectTlsProfile(hostname: string): Promise<TlsProfile> {
+  const host = hostname.toLowerCase().replace(/\.$/, "");
+  const memo = ctMemo.get(host);
+  if (memo && Date.now() - memo.at < CT_MEMO_MS) return memo.profile;
+
+  // A wildcard certificate for the parent domain also covers a one-label subdomain.
+  const labels = host.split(".");
+  const identities = labels.length > 2 ? [host, `*.${labels.slice(1).join(".")}`] : [host];
+  // Two independent CT search services: the second is asked only when the first cannot answer.
+  let entries: CtEntry[];
+  try {
+    entries = await crtshEntries(identities);
+  } catch (first) {
+    try {
+      entries = await certspotterEntries(host);
+    } catch (second) {
+      return { ok: false, unsupported: true, error: `Certificate Transparency lookup unavailable: ${ctFailure(first)}; ${ctFailure(second)}` };
+    }
+  }
+
+  const now = Date.now();
+  const covers = (name: string) =>
+    name === host || (name.startsWith("*.") && host.endsWith(name.slice(1)) && name.split(".").length === labels.length);
+  const valid = entries.filter((entry) => {
+    const from = ctTime(entry.not_before);
+    const to = ctTime(entry.not_after);
+    return from !== undefined && to !== undefined && from <= now && to > now && ctNames(entry).some(covers);
+  });
+
+  let profile: TlsProfile;
+  if (!valid.length) {
+    profile = { ok: false, error: `no currently valid, publicly trusted certificate for ${host} is logged in Certificate Transparency` };
+  } else {
+    // The oldest still-valid certificate. CT logs a certificate before the site deploys it,
+    // so the newest one is often not yet served (github.com serves a months-old certificate
+    // while a fresh one is already logged). "Issued very recently" then means every valid
+    // certificate for the host is new — the pattern of a newly stood-up site. Certificates
+    // issued *for* the host (subject CN) are preferred over ones that merely list it.
+    const ownCertificates = valid.filter((entry) => covers((entry.common_name ?? "").toLowerCase()));
+    const current = (ownCertificates.length ? ownCertificates : valid).reduce((a, b) =>
+      ctTime(b.not_before)! < ctTime(a.not_before)! ? b : a,
+    );
+    const validFrom = ctTime(current.not_before)!;
+    profile = {
+      ok: true,
+      issuer: dnField(current.issuer_name, "O") ?? dnField(current.issuer_name, "CN") ?? "unknown",
+      subject: current.common_name ?? host,
+      validFrom: new Date(validFrom).toISOString(),
+      validTo: new Date(ctTime(current.not_after)!).toISOString(),
+      ageDays: Math.round((now - validFrom) / 86400000),
+      // Only certificates from publicly trusted CAs are logged in CT.
+      selfSigned: false,
+      sanCount: ctNames(current).length,
+    };
+  }
+  ctMemo.set(host, { at: now, profile });
+  return profile;
 }
 
 export interface WebRiskResult {
@@ -181,7 +274,7 @@ export interface WebRiskResult {
 }
 
 export async function lookupWebRisk(url: string, reportId?: string): Promise<WebRiskResult> {
-  const key = process.env.WEB_RISK_API_KEY ?? process.env.SAFE_BROWSING_API_KEY;
+  const key = setting("WEB_RISK_API_KEY") ?? setting("SAFE_BROWSING_API_KEY");
   if (!key) {
     return {
       threats: [],
@@ -416,7 +509,7 @@ export function domainEvidence(profile: DnsProfile, tlsProfile: TlsProfile | nul
   if (tlsProfile?.ok) {
     out.push({
       provider: "domain-intel",
-      title: `TLS certificate presented by ${profile.hostname}`,
+      title: `TLS certificate logged for ${profile.hostname}`,
       excerpt: `Subject CN=${tlsProfile.subject} · Issuer=${tlsProfile.issuer} · valid ${tlsProfile.validFrom?.slice(0, 10)} → ${tlsProfile.validTo?.slice(0, 10)} · ${tlsProfile.sanCount ?? 0} SAN(s)`,
       stance: tlsProfile.selfSigned ? "contradicts" : "context",
       retrievedAt: new Date().toISOString(),

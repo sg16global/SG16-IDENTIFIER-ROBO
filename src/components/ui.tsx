@@ -1,8 +1,6 @@
-"use client";
-
-import Image from "next/image";
-import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { useLocation } from "react-router";
+import { Img } from "@/components/img";
+import { Link } from "@/components/link";
 import {
   useEffect,
   useRef,
@@ -16,14 +14,11 @@ import { COMPANY, CertificateButton, CompanyContact } from "@/components/corpora
 
 export function useReveal<T extends HTMLElement = HTMLDivElement>() {
   const ref = useRef<T | null>(null);
-  const [shown, setShown] = useState(false);
+  // Without IntersectionObserver there is nothing to wait for: show at once.
+  const [shown, setShown] = useState(() => typeof IntersectionObserver === "undefined");
   useEffect(() => {
     const node = ref.current;
-    if (!node) return;
-    if (typeof IntersectionObserver === "undefined") {
-      setShown(true);
-      return;
-    }
+    if (!node || typeof IntersectionObserver === "undefined") return;
     const io = new IntersectionObserver(
       (entries) => {
         for (const entry of entries) {
@@ -375,7 +370,7 @@ const NAV = [
 ];
 
 export function SiteHeader() {
-  const pathname = usePathname();
+  const { pathname } = useLocation();
   const [open, setOpen] = useState(false);
   const [scrolled, setScrolled] = useState(false);
   const [menuPath, setMenuPath] = useState(pathname);
@@ -401,7 +396,7 @@ export function SiteHeader() {
     >
       <div className="mx-auto flex h-16 max-w-[1400px] items-center gap-3 px-5 sm:gap-6 sm:px-8">
         <Link href="/" className="group flex shrink-0 items-center" aria-label="SG16 Identifier — home">
-          <Image
+          <Img
             src="/assets/logo.png"
             alt="SG16 Identifier — evidence before conclusion"
             width={1986}
@@ -538,7 +533,7 @@ export function SiteFooter() {
       <div className="relative mx-auto max-w-[1400px] px-5 py-16 sm:px-8">
         <div className="grid gap-12 sm:grid-cols-2 lg:grid-cols-[1.3fr_repeat(4,1fr)]">
           <div className="sm:col-span-2 lg:col-span-1">
-            <Image
+            <Img
               src="/assets/logo.png"
               alt="SG16 Identifier — evidence before conclusion"
               width={1986}
@@ -574,7 +569,7 @@ export function SiteFooter() {
                   );
                   return (
                     <li key={link.href}>
-                      {/* API endpoints are not pages: a plain anchor avoids Next.js RSC prefetching them. */}
+                      {/* API endpoints are not pages: a plain anchor loads them instead of routing in the app. */}
                       {link.href.startsWith("/api/") ? (
                         <a href={link.href} className={className}>{body}</a>
                       ) : (

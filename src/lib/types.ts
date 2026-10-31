@@ -150,3 +150,33 @@ export const CATEGORY_SHORT: Record<VerificationCategory, string> = {
   product: "Products",
   media: "Media",
 };
+
+/** Live figures for the homepage engine panel (GET /api/stats). */
+export interface EngineStats {
+  /** false when the database could not be read — every figure below is then meaningless. */
+  available: boolean;
+  reports: number;
+  cost: number;
+  /** Median report latency in ms; null until a report with a latency exists. */
+  latency: number | null;
+  /** Median calibrated confidence over reports that stated one; null when none did. */
+  confidence: number | null;
+  /** Reports that stated a confidence (the rest abstained with null). */
+  scored: number;
+  last: string | null;
+  catalog: number;
+  providerCalls: number;
+}
+
+/** AI Pioneers read live from the SG16 cloud (GET /api/pioneers). */
+export type Pioneer = {
+  name: string;
+  role: string;
+  photo: string;
+};
+
+export type PioneersPayload = {
+  source: string;
+  fetchedAt: string;
+  pioneers: Pioneer[];
+};

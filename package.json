@@ -1,40 +1,43 @@
 {
-  "name": "nextjs-postgresql-template",
+  "name": "sg16-identifier",
   "private": true,
+  "type": "module",
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite build && vite preview",
+    "deploy": "vite build && wrangler deploy",
+    "typecheck": "tsc -b",
     "lint": "eslint .",
-    "typecheck": "tsc --noEmit",
-    "build:worker": "opennextjs-cloudflare build",
-    "preview": "opennextjs-cloudflare build && opennextjs-cloudflare preview",
-    "deploy": "opennextjs-cloudflare build && opennextjs-cloudflare deploy",
-    "upload": "opennextjs-cloudflare build && opennextjs-cloudflare upload",
-    "cf-typegen": "wrangler types --env-interface CloudflareEnv cloudflare-env.d.ts",
+    "cf-typegen": "wrangler types src/worker/worker-configuration.d.ts",
     "embed:certificate": "node scripts/embed-certificate.mjs"
   },
   "dependencies": {
-    "@opennextjs/cloudflare": "1.20.13",
-    "dotenv": "17.3.1",
     "drizzle-orm": "0.45.2",
-    "next": "16.4.3",
     "pg": "8.20.0",
     "react": "19.2.6",
-    "react-dom": "19.2.6"
+    "react-dom": "19.2.6",
+    "react-router": "7.18.4"
   },
   "devDependencies": {
+    "@cloudflare/vite-plugin": "1.66.0",
+    "@eslint/js": "9.39.4",
     "@tailwindcss/postcss": "4.1.17",
     "@types/node": "22.19.15",
     "@types/pg": "8.18.0",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "6.1.2",
     "drizzle-kit": "0.31.10",
     "eslint": "9.39.4",
-    "eslint-config-next": "16.4.3",
+    "eslint-plugin-react-hooks": "7.1.1",
+    "eslint-plugin-react-refresh": "0.5.7",
+    "globals": "17.13.0",
     "postcss": "8.5.32",
     "tailwindcss": "4.1.17",
     "typescript": "5.9.3",
+    "typescript-eslint": "8.71.2",
+    "vite": "8.3.4",
     "wrangler": "4.154.0"
   }
 }

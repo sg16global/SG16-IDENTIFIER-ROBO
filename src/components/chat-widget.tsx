@@ -1,8 +1,5 @@
-"use client";
-
-import dynamic from "next/dynamic";
-import Image from "next/image";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { Img } from "@/components/img";
 import { ROBOT_EVENT, type ResultTone, type RobotEventDetail } from "@/components/robo-manager";
 import type { MessageKey } from "@/lib/chat-i18n";
 import type { ChatMessage, NewChatMessage, ScanContext } from "@/components/chat-panel";
@@ -17,7 +14,7 @@ import type { ChatMessage, NewChatMessage, ScanContext } from "@/components/chat
  * Only a high-risk result or a failed scan raises the unread badge.
  */
 const loadPanel = () => import("@/components/chat-panel");
-const ChatPanel = dynamic(loadPanel, { ssr: false });
+const ChatPanel = lazy(loadPanel);
 
 const APPEAR_AFTER_MS = 1200;
 
@@ -111,7 +108,7 @@ export function ChatWidget() {
       >
         {!everOpened && <span aria-hidden className="absolute inset-0 animate-pulse-ring rounded-full border border-brand-500/70" />}
         <span className="relative block h-full w-full overflow-hidden rounded-full">
-          <Image
+          <Img
             src="/assets/robo-manager.png"
             alt=""
             fill
@@ -126,7 +123,11 @@ export function ChatWidget() {
         )}
       </button>
 
-      {everOpened && <ChatPanel open={open} messages={messages} scan={scan} onAppend={append} onClose={closeChat} />}
+      {everOpened && (
+        <Suspense fallback={null}>
+          <ChatPanel open={open} messages={messages} scan={scan} onAppend={append} onClose={closeChat} />
+        </Suspense>
+      )}
     </>
   );
 }

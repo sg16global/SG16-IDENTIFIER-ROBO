@@ -1,7 +1,5 @@
-"use client";
-
 import { useCallback, useEffect, useState } from "react";
-import Link from "next/link";
+import { Link } from "@/components/link";
 import {
   IconAlert,
   IconArrow,
@@ -34,6 +32,9 @@ interface AdminData {
   spend?: { total: number; calls: number; errors: number };
   budget?: { dailyUsd: number; spentUsd: number; blocked: number };
   retentionDays?: number;
+  mustChangePassword?: boolean;
+  hasCustomCode?: boolean;
+  adminEmail?: string | null;
   error?: string;
 }
 
@@ -44,46 +45,54 @@ const FLAG_LABELS: Record<string, { label: string; hint: string }> = {
   public_intake: { label: "Public intake", hint: "Accept new verification requests at all. The emergency stop." },
 };
 
+type AdminLoad = { ok: true; data: AdminData } | { ok: false; message: string };
+
+async function fetchAdmin(accessCode: string): Promise<AdminLoad> {
+  try {
+    // The code travels in a header, never the URL (URLs end up in server and CDN logs).
+    const res = await fetch("/api/admin", { cache: "no-store", headers: { "x-sg16-admin": accessCode } });
+    const json = (await res.json()) as AdminData;
+    return res.ok && json.ok ? { ok: true, data: json } : { ok: false, message: json.error ?? `HTTP ${res.status}` };
+  } catch (error) {
+    return { ok: false, message: (error as Error).message };
+  }
+}
+
 export function AdminConsole() {
-  const [code, setCode] = useState("");
+  const [code, setCode] = useState(() => sessionStorage.getItem("sg16:admin") ?? "");
   const [data, setData] = useState<AdminData | null>(null);
-  const [state, setState] = useState<"locked" | "loading" | "ready" | "error">("locked");
+  const [state, setState] = useState<"locked" | "loading" | "ready" | "error">(() => (sessionStorage.getItem("sg16:admin") ? "loading" : "locked"));
   const [message, setMessage] = useState("");
   const [messageOk, setMessageOk] = useState(true);
+  const [newCode, setNewCode] = useState("");
+  const [confirmCode, setConfirmCode] = useState("");
+  const [changeMsg, setChangeMsg] = useState("");
 
-  // `background` refreshes an unlocked console in place; without it the lock
-  // screen (state "loading") replaced the whole console on every action.
-  const load = useCallback(async (accessCode: string, { background = false } = {}) => {
-    if (!background) setState("loading");
-    try {
-      // The code travels in a header, never the URL (URLs end up in server and CDN logs).
-      const res = await fetch("/api/admin", { cache: "no-store", headers: { "x-sg16-admin": accessCode } });
-      const json = (await res.json()) as AdminData;
-      if (!res.ok || !json.ok) {
-        setState("error");
-        setMessage(json.error ?? `HTTP ${res.status}`);
-        return;
-      }
-      setData(json);
+  const apply = useCallback((result: AdminLoad) => {
+    if (result.ok) {
+      setData(result.data);
       setState("ready");
       setMessage("");
-    } catch (error) {
+    } else {
       setState("error");
-      setMessage((error as Error).message);
+      setMessage(result.message);
     }
   }, []);
 
+  // Refreshes in place. Only unlocking shows the lock screen's "loading" state;
+  // doing that here replaced the whole console on every action.
+  const load = useCallback(async (accessCode: string) => apply(await fetchAdmin(accessCode)), [apply]);
+
   useEffect(() => {
-    const stored = typeof window !== "undefined" ? sessionStorage.getItem("sg16:admin") : null;
-    if (stored) {
-      setCode(stored);
-      void load(stored);
-    }
-  }, [load]);
+    // A stored code starts the console in "loading" (see the state initialiser).
+    const stored = sessionStorage.getItem("sg16:admin");
+    if (stored) void fetchAdmin(stored).then(apply);
+  }, [apply]);
 
   async function unlock(event: React.FormEvent) {
     event.preventDefault();
     sessionStorage.setItem("sg16:admin", code);
+    setState("loading");
     await load(code);
   }
 
@@ -96,7 +105,7 @@ export function AdminConsole() {
     });
     const json = (await res.json().catch(() => ({}))) as { ok?: boolean; inserted?: number; removed?: number; error?: string };
     // Reload first: load() clears the message on success, which used to wipe this result.
-    await load(code, { background: true });
+    await load(code);
     setMessageOk(Boolean(json.ok));
     setMessage(
       json.ok
@@ -107,6 +116,26 @@ export function AdminConsole() {
             : `${action} applied.`
         : json.error ?? "Action failed.",
     );
+  }
+
+  async function changeCode(event: React.FormEvent) {
+    event.preventDefault();
+    if (newCode !== confirmCode) {
+      setChangeMsg("The two entries do not match.");
+      return;
+    }
+    const res = await fetch("/api/admin", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-sg16-admin": code },
+      body: JSON.stringify({ action: "set-access-code", newCode }),
+    });
+    const json = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+    setChangeMsg(json.ok ? "Permanent code saved. This console now requires it." : json.error ?? "Could not save the new code.");
+    if (json.ok) {
+      setNewCode("");
+      setConfirmCode("");
+      await load(code);
+    }
   }
 
   if (state === "locked" || state === "error" || state === "loading") {
@@ -144,9 +173,9 @@ export function AdminConsole() {
             </p>
           )}
           <p className="mt-5 text-[11.5px] leading-relaxed text-mist-600">
-            In a development sandbox without <code className="font-mono">ADMIN_ACCESS_CODE</code> set,
-            the default code is <code className="font-mono text-mist-400">sg16-admin</code>. Set the
-            variable before production and require MFA on the operator account.
+            There is no default code: until <code className="font-mono">ADMIN_ACCESS_CODE</code> is set
+            on the server, the console stays closed to everyone. The first login with that temporary
+            code requires setting a permanent one. Require MFA on the operator account.
           </p>
         </Panel>
       </div>
@@ -170,6 +199,46 @@ export function AdminConsole() {
         >
           {message}
         </div>
+      )}
+
+      {data.mustChangePassword && (
+        <Panel hover={false} className="border-warn-500/40 p-6">
+          <SectionLabel>Action required — replace the temporary access code</SectionLabel>
+          <p className="mt-3 text-[13px] leading-relaxed text-mist-500">
+            You unlocked the console with the temporary code from the server configuration. Set a
+            permanent code now; it is stored only as a SHA-256 hash, and the temporary code keeps
+            working as recovery but will keep asking for this until replaced.
+            {data.adminEmail && <> Operator contact on file: <span className="font-mono text-mist-300">{data.adminEmail}</span>.</>}
+          </p>
+          <form onSubmit={changeCode} className="mt-4 grid gap-3 sm:grid-cols-2">
+            <input
+              type="password"
+              value={newCode}
+              onChange={(e) => setNewCode(e.target.value)}
+              placeholder="New permanent code (min. 12 characters)"
+              aria-label="New permanent access code"
+              autoComplete="new-password"
+              className="field px-4 py-3 text-[13px]"
+            />
+            <input
+              type="password"
+              value={confirmCode}
+              onChange={(e) => setConfirmCode(e.target.value)}
+              placeholder="Repeat the new code"
+              aria-label="Repeat the new access code"
+              autoComplete="new-password"
+              className="field px-4 py-3 text-[13px]"
+            />
+            <button
+              type="submit"
+              disabled={newCode.length < 12 || newCode !== confirmCode}
+              className="glow-accent inline-flex items-center justify-center gap-2 rounded-sm bg-brand-cta px-5 py-3 text-[13.5px] font-semibold text-white transition-[transform,background-color] hover:-translate-y-0.5 hover:bg-brand-cta-hover disabled:opacity-50 sm:col-span-2"
+            >
+              Save permanent code <IconArrow className="h-4 w-4" />
+            </button>
+          </form>
+          {changeMsg && <p className="mt-3 text-[12.5px] text-mist-400">{changeMsg}</p>}
+        </Panel>
       )}
 
       {/* headline metrics */}
@@ -426,7 +495,7 @@ export function AdminConsole() {
           <button type="button" onClick={() => void act("purge-expired")} className="inline-flex items-center gap-2 rounded-sm border border-warn-500/40 bg-warn-500/8 px-4 py-2.5 text-[13px] text-warn-400 transition-colors hover:bg-warn-500/15">
             <IconCpu className="h-4 w-4" /> Purge expired reports
           </button>
-          <button type="button" onClick={() => void load(code, { background: true })} className="inline-flex items-center gap-2 rounded-sm border border-mist-500/25 px-4 py-2.5 text-[13px] text-mist-300 transition-colors hover:border-mist-400/50">
+          <button type="button" onClick={() => void load(code)} className="inline-flex items-center gap-2 rounded-sm border border-mist-500/25 px-4 py-2.5 text-[13px] text-mist-300 transition-colors hover:border-mist-400/50">
             Refresh
           </button>
           <button

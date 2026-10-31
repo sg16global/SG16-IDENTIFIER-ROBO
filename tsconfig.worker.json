@@ -1,0 +1,19 @@
+{
+  // The Cloudflare Worker (workerd). Runtime and binding types come from `npm run cf-typegen`;
+  // "node" covers the nodejs_compat APIs used (AsyncLocalStorage, and pg's own types).
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.worker.tsbuildinfo",
+    "target": "ES2022",
+    "lib": ["ES2023"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "types": ["node"],
+    "strict": true,
+    "noEmit": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "paths": { "@/*": ["./src/*"] }
+  },
+  "include": ["src/worker"]
+}

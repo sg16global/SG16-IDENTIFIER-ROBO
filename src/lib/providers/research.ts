@@ -1,6 +1,7 @@
 import type { EvidenceSource, ProviderCall } from "@/lib/types";
 import { disabled, meter, skipped } from "@/lib/providers/registry";
 import { truncate } from "@/lib/utils";
+import { setting } from "@/lib/settings";
 
 /**
  * News & claim research adapters (blueprint §5).
@@ -69,7 +70,7 @@ export async function fetchFactChecks(
   query: string,
   opts: { reportId?: string; pageSize?: number } = {},
 ): Promise<{ hits: FactCheckHit[]; call: ProviderCall }> {
-  const key = process.env.GOOGLE_FACTCHECK_API_KEY;
+  const key = setting("GOOGLE_FACTCHECK_API_KEY");
   if (!key) {
     return {
       hits: [],
@@ -123,9 +124,9 @@ export async function searchWeb(
   query: string,
   opts: { reportId?: string; maxResults?: number } = {},
 ): Promise<{ results: SearchResult[]; answer?: string; call: ProviderCall }> {
-  const tavily = process.env.TAVILY_API_KEY;
-  const serper = process.env.SERPER_API_KEY;
-  const bing = process.env.BING_SEARCH_KEY;
+  const tavily = setting("TAVILY_API_KEY");
+  const serper = setting("SERPER_API_KEY");
+  const bing = setting("BING_SEARCH_KEY");
 
   if (!tavily && !serper && !bing) {
     return {

@@ -1,13 +1,17 @@
 import type { ProviderCall } from "@/lib/types";
 import { disabled, meter } from "@/lib/providers/registry";
-import { round } from "@/lib/utils";
+import { callModel, costOf } from "@/lib/universal/chat";
+import { defaultRoute } from "@/lib/universal/providers";
+import type { ChatRequest } from "@/lib/universal/types";
 
 /**
  * AI reasoning adapter (blueprint §5).
  *
- * OpenAI-compatible chat completions with a JSON contract. The model is used for
- * claim decomposition, evidence comparison and drafting human-readable text —
- * never for inventing sources. When no key is configured the engine falls back
+ * Chat completions with a JSON contract, sent to whichever model the Vitex
+ * universal layer is configured for: any OpenAI-compatible server, Anthropic,
+ * Gemini or Workers AI (src/lib/universal). The model is used for claim
+ * decomposition, evidence comparison and drafting human-readable text — never
+ * for inventing sources. When no provider is configured the engine falls back
  * to the deterministic rules pipeline and says so in the report.
  */
 
@@ -17,17 +21,13 @@ export interface AiResult<T> {
   reasoning: string;
 }
 
-const INPUT_PRICE_PER_M = Number(process.env.SG16_AI_INPUT_PRICE_PER_M ?? "0.05");
-const OUTPUT_PRICE_PER_M = Number(process.env.SG16_AI_OUTPUT_PRICE_PER_M ?? "0.25");
-const DEFAULT_MODEL = process.env.SG16_AI_MODEL ?? "gpt-4o-mini";
-const BASE_URL = process.env.SG16_AI_BASE_URL ?? "https://api.openai.com/v1";
-
 export function aiConfigured(): boolean {
-  return Boolean(process.env.OPENAI_API_KEY ?? process.env.SG16_AI_API_KEY);
+  return defaultRoute() !== null;
 }
 
-export function aiModel(): string {
-  return DEFAULT_MODEL;
+/** `<provider>/<model>` of the model in use, or null when none is configured. */
+export function aiModel(): string | null {
+  return defaultRoute()?.id ?? null;
 }
 
 export function estimateTokens(text: string): number {
@@ -51,12 +51,12 @@ export async function aiStructured<T>({
   temperature?: number;
   operation?: string;
 }): Promise<AiResult<T>> {
-  const apiKey = process.env.OPENAI_API_KEY ?? process.env.SG16_AI_API_KEY;
-  if (!apiKey) {
+  const route = defaultRoute();
+  if (!route) {
     return {
       json: null,
-      reasoning: "No AI provider key is configured. This report was produced entirely by the deterministic SG16 rules engine.",
-      call: disabled("ai-analysis", operation, "OPENAI_API_KEY not configured — rules engine only."),
+      reasoning: "No AI provider is configured. This report was produced entirely by the deterministic SG16 rules engine.",
+      call: disabled("ai-analysis", operation, "No AI provider configured — rules engine only."),
     };
   }
 
@@ -78,37 +78,27 @@ ${schemaHint}
 ${user.slice(0, 12000)}
 </content>`;
 
+  // Claude and Gemini models think before answering and that thinking counts
+  // against the output limit, so a short JSON budget needs headroom there.
+  const thinks = route.provider.protocol === "anthropic" || route.provider.protocol === "gemini";
+  const request: ChatRequest = {
+    model: route.model,
+    temperature,
+    max_tokens: thinks ? Math.max(maxTokens, 4096) : maxTokens,
+    ...(route.provider.jsonMode ? { response_format: { type: "json_object" as const } } : {}),
+    messages: [
+      { role: "system", content: "You are the SG16 Identifier verification analyst. You output strict JSON." },
+      { role: "user", content: prompt },
+    ],
+  };
+
   try {
-    const { data, call } = await meter("ai-analysis", `${DEFAULT_MODEL}:${operation}`, async () => {
-      const res = await fetch(`${BASE_URL.replace(/\/$/, "")}/chat/completions`, {
-        method: "POST",
-        signal: AbortSignal.timeout(25000),
-        headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
-        body: JSON.stringify({
-          model: DEFAULT_MODEL,
-          temperature,
-          max_tokens: maxTokens,
-          response_format: { type: "json_object" },
-          messages: [
-            { role: "system", content: "You are the SG16 Identifier verification analyst. You output strict JSON." },
-            { role: "user", content: prompt },
-          ],
-        }),
-      });
-      if (!res.ok) {
-        const body = await res.text().catch(() => "");
-        throw new Error(`AI provider responded ${res.status}: ${body.slice(0, 200)}`);
-      }
-      return (await res.json()) as {
-        choices?: Array<{ message?: { content?: string } }>;
-        usage?: { prompt_tokens?: number; completion_tokens?: number };
-      };
-    }, { reportId });
+    const { data, call } = await meter("ai-analysis", `${route.id}:${operation}`, () => callModel(route, request, 25000), { reportId });
 
     const content = data.choices?.[0]?.message?.content ?? "";
     const tokensIn = data.usage?.prompt_tokens ?? estimateTokens(prompt);
     const tokensOut = data.usage?.completion_tokens ?? estimateTokens(content);
-    const cost = round((tokensIn / 1e6) * INPUT_PRICE_PER_M + (tokensOut / 1e6) * OUTPUT_PRICE_PER_M, 6);
+    const cost = costOf(route, { prompt_tokens: tokensIn, completion_tokens: tokensOut, total_tokens: tokensIn + tokensOut });
 
     call.tokensIn = tokensIn;
     call.tokensOut = tokensOut;
@@ -126,8 +116,8 @@ ${user.slice(0, 12000)}
     return {
       json,
       reasoning: json
-        ? `AI analyst (${DEFAULT_MODEL}) processed ${tokensIn} input / ${tokensOut} output tokens at an estimated ${`$${cost.toFixed(6)}`}.`
-        : `AI analyst (${DEFAULT_MODEL}) returned content that failed JSON validation; the rules-engine result was used instead.`,
+        ? `AI analyst (${route.id}) processed ${tokensIn} input / ${tokensOut} output tokens at an estimated ${`$${cost.toFixed(6)}`}.`
+        : `AI analyst (${route.id}) returned content that failed JSON validation; the rules-engine result was used instead.`,
       call,
     };
   } catch (error) {

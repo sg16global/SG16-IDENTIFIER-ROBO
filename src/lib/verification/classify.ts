@@ -1,5 +1,5 @@
 import type { VerificationCategory } from "@/lib/types";
-import { inspectBarcode, inspectImei, looksLikeModelNumber } from "@/lib/identifiers/checksums";
+import { inspectBarcode, inspectImei, looksLikeModelNumber, modelCodesInText } from "@/lib/identifiers/checksums";
 import { parseUntrustedUrl } from "@/lib/security/url-guard";
 import { PRODUCT_CATEGORY_RULES, SCAM_SIGNALS, brandsInText } from "@/lib/verification/lexicon";
 
@@ -22,8 +22,10 @@ export interface Classification {
   alternatives: Array<{ category: VerificationCategory; why: string }>;
 }
 
-const URL_RE = /\b(?:https?:\/\/|www\.)[^\s<>"'()\[\]]+/gi;
+const URL_RE = /\b(?:https?:\/\/|www\.)[^\s<>"'()[\]]+/gi;
 const EMAIL_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
+const SPEC_QUANTITY_RE = /\b\d+(?:\.\d+)?[\s-]?(?:gb|tb|mah|wh|w|hz|mp|mm|inch(?:es)?)\b/gi;
+const LISTING_RE = /\b(?:seller|sealed|brand[\s-]new|new in box|bulk lot|ships? from|for sale|refurbished)\b|[$€£]\s?\d/i;
 
 export function classifyInput(
   raw: string,
@@ -37,6 +39,7 @@ export function classifyInput(
   const imei = inspectImei(text);
   const barcode = inspectBarcode(text);
   const model = looksLikeModelNumber(text) && text.length <= 32 ? text : null;
+  const embeddedModel = model ? null : (modelCodesInText(text)[0] ?? null);
   const reasons: string[] = [];
   const alternatives: Classification["alternatives"] = [];
 
@@ -74,6 +77,11 @@ export function classifyInput(
   if (model) {
     scores.product += 0.85;
     reasons.push(`"${model}" matches the shape of a manufacturer model number (letters + digits, 4–32 characters).`);
+  } else if (embeddedModel) {
+    // A code inside prose is weaker evidence on its own ("COVID-19"), so it needs specs or listing details to outrank a claim.
+    const corroboration = (text.match(SPEC_QUANTITY_RE) ?? []).length + (LISTING_RE.test(text) ? 1 : 0);
+    scores.product += 0.6 + 0.25 * Math.min(corroboration, 3);
+    reasons.push(`"${embeddedModel}" inside the text has the shape of a manufacturer model code${corroboration ? ", alongside specification or listing details" : ""}.`);
   }
   if (brands.length && !urls.length) {
     scores.product += 0.25 * Math.min(brands.length, 3);

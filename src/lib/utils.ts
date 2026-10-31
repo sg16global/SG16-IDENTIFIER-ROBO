@@ -1,9 +1,38 @@
-import { randomBytes } from "node:crypto";
+/* ------------------------------- bytes ------------------------------- */
+// Web Crypto and plain JS only: this module runs in the browser and the Worker.
+
+export function randomBytes(length: number): Uint8Array {
+  return crypto.getRandomValues(new Uint8Array(length));
+}
+
+export function toHex(bytes: Uint8Array): string {
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** Each byte as one character (ISO-8859-1), for reading binary signatures. */
+export function latin1(bytes: Uint8Array): string {
+  let out = "";
+  for (const b of bytes) out += String.fromCharCode(b);
+  return out;
+}
+
+/** Decodes base64, with or without a data: URL prefix. Throws on malformed input. */
+export function base64ToBytes(value: string): Uint8Array {
+  const binary = atob(value.replace(/^data:[^,]*,/, ""));
+  return Uint8Array.from(binary, (c) => c.charCodeAt(0));
+}
+
+export async function sha256Hex(input: string | Uint8Array): Promise<string> {
+  const data = typeof input === "string" ? new TextEncoder().encode(input) : new Uint8Array(input);
+  return toHex(new Uint8Array(await crypto.subtle.digest("SHA-256", data)));
+}
+
+/* -------------------------------- ids -------------------------------- */
 
 const ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no I/O/0/1 — readable IDs
 
 export function newId(prefix = ""): string {
-  return `${prefix}${randomBytes(16).toString("hex")}`;
+  return `${prefix}${toHex(randomBytes(16))}`;
 }
 
 /** Human-shareable, unguessable report reference: SG16-4KQ2-9MXT */

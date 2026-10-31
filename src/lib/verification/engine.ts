@@ -18,7 +18,7 @@ import {
 } from "@/lib/verification/module";
 import { validateUpload } from "@/lib/security/uploads";
 import { ensureFlagsSeeded, getEngineFlags, persistReport } from "@/lib/db/reports";
-import { newId, newPublicId, round } from "@/lib/utils";
+import { base64ToBytes, newId, newPublicId, round } from "@/lib/utils";
 import { getProviderConfigs } from "@/lib/providers/registry";
 
 export interface EngineResult {
@@ -48,8 +48,13 @@ async function prepareFile(
 ): Promise<{ uploaded: UploadedFile | null; error?: string }> {
   if (!file) return { uploaded: null };
   if (!file.base64) return { uploaded: null, error: "File payload was empty." };
-  const raw = Buffer.from(file.base64, "base64");
-  const validation = validateUpload(file.type ?? "application/octet-stream", raw);
+  let raw: Uint8Array;
+  try {
+    raw = base64ToBytes(file.base64);
+  } catch {
+    return { uploaded: null, error: "File payload is not valid base64." };
+  }
+  const validation = await validateUpload(file.type ?? "application/octet-stream", raw);
   if (!validation.ok) return { uploaded: null, error: validation.reason };
   return {
     uploaded: {

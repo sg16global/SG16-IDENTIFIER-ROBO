@@ -1,7 +1,5 @@
-"use client";
-
 import { useEffect, useState } from "react";
-import type { Pioneer, PioneersPayload } from "@/lib/pioneers";
+import type { Pioneer, PioneersPayload } from "@/lib/types";
 import { Reveal } from "@/components/ui";
 
 /**
@@ -142,8 +140,7 @@ function PioneerCard({ pioneer: p, duplicate }: { pioneer: Pioneer; duplicate: b
       }`}
     >
       <div className="relative aspect-square overflow-hidden rounded-sm border border-ink-600 bg-ink-950">
-        {/* Remote photo served by the SG16 source site; next/image would need its host allow-listed. */}
-        {/* eslint-disable-next-line @next/next/no-img-element */}
+        {/* Remote photo served by the SG16 source site, so it bypasses the local /api/image resizer. */}
         <img
           src={p.photo}
           alt={duplicate ? "" : p.name}

@@ -1,5 +1,3 @@
-"use client";
-
 import { useEffect, useState } from "react";
 import { IconArrow, IconSeal, Panel, SectionLabel, TonalChip } from "@/components/ui";
 

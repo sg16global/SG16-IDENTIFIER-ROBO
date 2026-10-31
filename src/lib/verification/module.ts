@@ -81,7 +81,7 @@ export class StepTimer {
 
 /* ------------------------- text analysis helpers ------------------------- */
 
-const SENTENCE_RE = /(?<=[.!?…])\s+(?=[A-Z0-9"'“(\[])/g;
+const SENTENCE_RE = /(?<=[.!?…])\s+(?=[A-Z0-9"'“([])/g;
 
 /** Deterministic claim decomposition used when no AI provider is configured. */
 export function splitClaims(text: string, limit = 6): string[] {

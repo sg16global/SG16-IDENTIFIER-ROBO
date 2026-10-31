@@ -1,7 +1,5 @@
-"use client";
-
 import { useCallback, useEffect, useRef, useState } from "react";
-import Link from "next/link";
+import { Link } from "@/components/link";
 import type { VerificationCategory, VerificationReport } from "@/lib/types";
 import { CATEGORY_LABEL, VERDICT_TONE } from "@/lib/types";
 import { ReportView } from "@/components/report-view";
@@ -80,20 +78,18 @@ export function VerifyConsole({
   const [error, setError] = useState<string | null>(null);
   const [report, setReport] = useState<VerificationReport | null>(null);
   const [dragging, setDragging] = useState(false);
-  const [recent, setRecent] = useState<Array<{ publicId: string; category: string; status: string; at: string }>>([]);
+  const [recent, setRecent] = useState<Array<{ publicId: string; category: string; status: string; at: string }>>(() => {
+    try {
+      const stored = localStorage.getItem("sg16:recent");
+      return stored ? JSON.parse(stored) : [];
+    } catch {
+      return []; // private mode
+    }
+  });
   const [engine, setEngine] = useState<"checking" | "online" | "degraded">("checking");
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
   const resultRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    try {
-      const stored = localStorage.getItem("sg16:recent");
-      if (stored) setRecent(JSON.parse(stored));
-    } catch {
-      /* private mode */
-    }
-  }, []);
 
   // The status indicator reflects the real liveness probe rather than a fixed "online" label.
   useEffect(() => {
@@ -113,7 +109,6 @@ export function VerifyConsole({
 
   useEffect(() => {
     if (!busy) return;
-    setStage(0);
     const timers = STAGES.map((_, i) => setTimeout(() => setStage(i), 500 + i * 750));
     return () => timers.forEach(clearTimeout);
   }, [busy]);
@@ -141,6 +136,7 @@ export function VerifyConsole({
       inputRef.current?.focus();
       return;
     }
+    setStage(0);
     setBusy(true);
     setError(null);
     setReport(null);

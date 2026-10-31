@@ -3,6 +3,8 @@ import { providerUsage } from "@/db/schema";
 import type { ProviderCall } from "@/lib/types";
 import { newId, round } from "@/lib/utils";
 import { recordSpend } from "@/lib/security/rate-limit";
+import { defaultRoute, enabledProviders, providerStatuses } from "@/lib/universal/providers";
+import { setting } from "@/lib/settings";
 
 /**
  * Provider registry.
@@ -23,16 +25,17 @@ export interface ProviderConfig {
 }
 
 function envFlag(name: string, fallback = true): boolean {
-  const raw = process.env[name];
+  const raw = setting(name);
   if (raw === undefined) return fallback;
   return ["1", "true", "yes", "on"].includes(raw.toLowerCase());
 }
 
 export function getProviderConfigs(): ProviderConfig[] {
-  const factCheckKey = process.env.GOOGLE_FACTCHECK_API_KEY;
-  const webRiskKey = process.env.WEB_RISK_API_KEY ?? process.env.SAFE_BROWSING_API_KEY;
-  const aiKey = process.env.OPENAI_API_KEY ?? process.env.SG16_AI_API_KEY;
-  const searchKey = process.env.TAVILY_API_KEY ?? process.env.SERPER_API_KEY ?? process.env.BING_SEARCH_KEY;
+  const factCheckKey = setting("GOOGLE_FACTCHECK_API_KEY");
+  const webRiskKey = setting("WEB_RISK_API_KEY") ?? setting("SAFE_BROWSING_API_KEY");
+  // Any model the Vitex universal layer can reach (src/lib/universal/providers.ts).
+  const ai = defaultRoute();
+  const searchKey = setting("TAVILY_API_KEY") ?? setting("SERPER_API_KEY") ?? setting("BING_SEARCH_KEY");
 
   return [
     {
@@ -79,10 +82,10 @@ export function getProviderConfigs(): ProviderConfig[] {
       id: "ai-analysis",
       label: "AI claim extraction & reasoning",
       purpose: "Splits text into atomic claims, compares retrieved evidence, drafts the human summary.",
-      enabled: Boolean(aiKey),
-      reason: aiKey ? undefined : "OPENAI_API_KEY not configured",
+      enabled: Boolean(ai),
+      reason: ai ? undefined : aiUnavailableReason(),
       costPerCallUsd: 0.0006,
-      docsUrl: "https://openai.com/api/pricing/",
+      docsUrl: ai?.provider.docsUrl ?? "https://openai.com/api/pricing/",
     },
     {
       id: "web-search",
@@ -94,6 +97,13 @@ export function getProviderConfigs(): ProviderConfig[] {
       docsUrl: "https://developers.google.com/custom-search/v1/overview",
     },
   ];
+}
+
+function aiUnavailableReason(): string {
+  if (enabledProviders().length) return "VITEX_DEFAULT_MODEL does not name an available model";
+  const misconfigured = providerStatuses().find((p) => p.source !== "preset" && p.reason);
+  if (misconfigured) return `${misconfigured.id}: ${misconfigured.reason}`;
+  return "No AI provider configured (OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY, Workers AI, or VITEX_PROVIDERS)";
 }
 
 export function providerEnabled(id: string): boolean {
@@ -151,14 +161,20 @@ export function disabled(provider: string, operation: string, detail: string): P
   return { provider, operation, status: "disabled", latencyMs: 0, costUsd: 0, detail };
 }
 
+/** Meters a call made outside meter(): streams, the universal gateway, the upstream proxy. */
+export function recordProviderCall(call: ProviderCall, reportId?: string): Promise<void> {
+  return persistUsage(call, reportId);
+}
+
 async function persistUsage(call: ProviderCall, reportId?: string) {
-  recordSpend(call.costUsd);
+  await recordSpend(call.costUsd);
   try {
     await db.insert(providerUsage).values({
       id: newId(),
       reportId: reportId ?? null,
-      provider: call.provider,
-      operation: call.operation,
+      // Column widths (schema.ts); a longer model id must not drop the row.
+      provider: call.provider.slice(0, 48),
+      operation: call.operation.slice(0, 64),
       status: call.status === "ok" ? "ok" : call.status,
       latencyMs: call.latencyMs,
       tokensIn: call.tokensIn ?? null,

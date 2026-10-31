@@ -10,6 +10,8 @@
  * blueprint is explicit that AI detection alone is not proof of fabrication.
  */
 
+import { latin1, toHex } from "@/lib/utils";
+
 export interface PngTextChunk {
   key: string;
   value: string;
@@ -103,10 +105,10 @@ function readU32(buf: Uint8Array, off: number, le: boolean): number {
     : ((buf[off] << 24) | (buf[off + 1] << 16) | (buf[off + 2] << 8) | buf[off + 3]) >>> 0;
 }
 function latin(buf: Uint8Array, start: number, len: number): string {
-  return Buffer.from(buf.subarray(start, start + len)).toString("latin1");
+  return latin1(buf.subarray(start, start + len));
 }
 function utf8(buf: Uint8Array, start: number, len: number): string {
-  return Buffer.from(buf.subarray(start, start + len)).toString("utf8");
+  return new TextDecoder("utf-8").decode(buf.subarray(start, start + len));
 }
 
 export function shannonEntropy(buf: Uint8Array): number {
@@ -204,7 +206,7 @@ function parseTiff(buf: Uint8Array, tiffStart: number): { tags: Record<string, s
           const d = readU32(buf, valueOffset + 4, le);
           tags[name] = d === 0 ? String(n) : `${n}/${d}`;
         } else if (type === 1 || type === 7) {
-          tags[name] = Buffer.from(buf.subarray(valueOffset, valueOffset + Math.min(total, 8))).toString("hex");
+          tags[name] = toHex(buf.subarray(valueOffset, valueOffset + Math.min(total, 8)));
         }
       } catch {
         /* malformed tag — skip, do not fail the report */
@@ -285,7 +287,7 @@ export function analyzeMedia(bytes: Uint8Array): MediaForensics {
   };
 
   const asText = utf8(bytes, 0, Math.min(bytes.length, 4 * 1024 * 1024));
-  const hex = Buffer.from(bytes.subarray(0, 16)).toString("hex");
+  const hex = toHex(bytes.subarray(0, 16));
 
   /* ------------------------------- PNG ------------------------------- */
   if (hex.startsWith("89504e470d0a1a0a")) {

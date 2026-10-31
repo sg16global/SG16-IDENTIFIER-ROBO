@@ -1,7 +1,5 @@
-"use client";
-
-import Image from "next/image";
-import { useRouter } from "next/navigation";
+import { useNavigate } from "react-router";
+import { Img } from "@/components/img";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type FormEvent } from "react";
 import {
   CHAT_LANGUAGES,
@@ -138,7 +136,7 @@ export default function ChatPanel({ open, messages, scan, onAppend, onClose }: P
   const [lang, setLang] = useState<ChatLang>(() => readStored(LANG_KEY, (raw) => (isChatLang(raw) ? raw : DEFAULT_LANG)));
   const [voiceOn, setVoiceOn] = useState(() => readStored(VOICE_KEY, (raw) => raw !== "0"));
   const [draft, setDraft] = useState("");
-  const router = useRouter();
+  const navigate = useNavigate();
   const muted = useRobotMuted();
   useSyncExternalStore(subscribeVoices, voiceCount, () => 0);
 
@@ -230,7 +228,7 @@ export default function ChatPanel({ open, messages, scan, onAppend, onClose }: P
           field.focus({ preventScroll: true });
           if (window.matchMedia("(max-width: 639px)").matches) onClose();
         } else {
-          router.push("/#identify");
+          navigate("/#identify");
         }
         break;
       }
@@ -280,7 +278,7 @@ export default function ChatPanel({ open, messages, scan, onAppend, onClose }: P
       <header className="border-b border-brand-700/60 bg-ink-900/90 px-4 py-3">
         <div className="flex items-center gap-3">
           <span className="relative h-10 w-10 shrink-0 overflow-hidden rounded-full border border-brand-800 bg-ink-950">
-            <Image src="/assets/robo-manager.png" alt="" fill sizes="40px" className="scale-[1.7] object-cover object-[50%_16%]" />
+            <Img src="/assets/robo-manager.png" alt="" fill sizes="40px" className="scale-[1.7] object-cover object-[50%_16%]" />
           </span>
           <div className="min-w-0 flex-1">
             <h2 id="sg16-chat-title" className="font-display text-[15px] font-semibold text-paper-50" dir="ltr">

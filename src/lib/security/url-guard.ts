@@ -1,5 +1,5 @@
-import dns from "node:dns/promises";
-import net from "node:net";
+import { lookupAll } from "@/lib/security/doh";
+import { isIP, isIPv4, isIPv6 } from "@/lib/security/ip";
 
 /**
  * SSRF defence for the URL-fetching backend (blueprint §8, OWASP guidance).
@@ -32,7 +32,7 @@ const BLOCKED_SUFFIXES = [
 ];
 
 export function isPrivateAddress(ip: string): boolean {
-  if (net.isIPv4(ip)) {
+  if (isIPv4(ip)) {
     const parts = ip.split(".").map((n) => Number.parseInt(n, 10));
     if (parts.length !== 4 || parts.some((n) => Number.isNaN(n))) return true;
     const [a, b] = parts;
@@ -47,7 +47,7 @@ export function isPrivateAddress(ip: string): boolean {
     if (a >= 224) return true; // multicast + reserved
     return false;
   }
-  if (net.isIPv6(ip)) {
+  if (isIPv6(ip)) {
     const lower = ip.toLowerCase();
     if (lower === "::" || lower === "::1") return true;
     if (lower.startsWith("fe80")) return true; // link-local
@@ -65,8 +65,8 @@ export function hostnameLooksInternal(hostname: string): boolean {
   const h = hostname.toLowerCase().replace(/\.$/, "");
   if (BLOCKED_HOSTNAMES.has(h)) return true;
   if (BLOCKED_SUFFIXES.some((s) => h.endsWith(s))) return true;
-  if (net.isIP(h) && isPrivateAddress(h)) return true;
-  if (!h.includes(".") && !net.isIP(h)) return true; // bare label = internal host
+  if (isIP(h) && isPrivateAddress(h)) return true;
+  if (!h.includes(".") && !isIP(h)) return true; // bare label = internal host
   return false;
 }
 
@@ -105,14 +105,13 @@ export function parseUntrustedUrl(raw: string): UrlParseResult {
 export async function assertPublicResolution(
   hostname: string,
 ): Promise<{ ok: boolean; addresses: string[]; reason?: string }> {
-  if (net.isIP(hostname)) {
+  if (isIP(hostname)) {
     return isPrivateAddress(hostname)
       ? { ok: false, addresses: [hostname], reason: "Literal private IP address" }
       : { ok: true, addresses: [hostname] };
   }
   try {
-    const records = await dns.lookup(hostname, { all: true, verbatim: true });
-    const addresses = records.map((r) => r.address);
+    const addresses = await lookupAll(hostname);
     if (!addresses.length) {
       return { ok: false, addresses: [], reason: "Hostname did not resolve" };
     }
@@ -221,7 +220,7 @@ export async function safeFetch(
         finalUrl: current.toString(),
         redirectChain: chain,
         bytes: buffer.byteLength,
-        body: new TextDecoder("utf-8", { fatal: false }).decode(slice),
+        body: new TextDecoder("utf-8").decode(slice),
         headers: Object.fromEntries(response.headers.entries()),
       };
     } catch (error) {

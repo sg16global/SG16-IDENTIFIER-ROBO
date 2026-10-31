@@ -1,26 +1,23 @@
+import { env } from "cloudflare:workers";
+import { setting } from "@/lib/settings";
+import type { BudgetSnapshot, GuardState, WindowResult } from "@/worker/guard";
+
 /**
- * Per-fingerprint sliding-window limiter + daily variable-cost budget.
- * In-memory by design for a single instance; swap for Redis without changing
- * the call sites when the service scales out (blueprint §8).
+ * Per-fingerprint sliding-window limiter + daily variable-cost budget
+ * (blueprint §8), shared by every Worker instance through the GuardState
+ * Durable Object (binding GUARD in wrangler.jsonc).
  *
- * On Cloudflare Workers this code runs unchanged (no Node APIs), but every
- * isolate keeps its own counters, so limits and the budget are per instance,
- * not global. For shared limits, back consumeRateLimit with Cloudflare's
- * Rate Limiting binding or a Durable Object, and the budget with a Durable
- * Object (KV is eventually consistent and too slow to count requests).
+ * If the binding is missing or unreachable, the same limits apply per
+ * isolate from memory instead — weaker (each instance counts alone) but never
+ * an outage. The fallback is logged so it does not go unnoticed.
  */
-
-interface WindowEntry {
-  hits: number[];
-}
-
-const windows = new Map<string, WindowEntry>();
-const dayBudget = { date: "", spentUsd: 0, blocked: 0 };
 
 export interface RateLimitPolicy {
   windowMs: number;
   maxRequests: number;
 }
+
+const GATEWAY_RPM = Number(setting("VITEX_GATEWAY_RPM") ?? "120");
 
 export const POLICIES: Record<string, RateLimitPolicy> = {
   verify: { windowMs: 60_000, maxRequests: 6 },
@@ -28,82 +25,120 @@ export const POLICIES: Record<string, RateLimitPolicy> = {
   newsletter: { windowMs: 3_600_000, maxRequests: 3 },
   affiliate: { windowMs: 60_000, maxRequests: 30 },
   certificate: { windowMs: 60_000, maxRequests: 10 },
+  // Per API key on the Vitex universal API (/v1/*).
+  gateway: { windowMs: 60_000, maxRequests: Number.isFinite(GATEWAY_RPM) && GATEWAY_RPM > 0 ? GATEWAY_RPM : 120 },
 };
 
-export interface RateLimitResult {
-  allowed: boolean;
-  remaining: number;
-  retryAfterMs: number;
-  limit: number;
+export type RateLimitResult = WindowResult;
+
+export const DAILY_BUDGET_USD = Number(setting("SG16_DAILY_BUDGET_USD") ?? "12");
+
+function guard(): DurableObjectNamespace<GuardState> | undefined {
+  return (env as { GUARD?: DurableObjectNamespace<GuardState> }).GUARD;
 }
 
-export function consumeRateLimit(
-  fingerprint: string,
-  policy: RateLimitPolicy = POLICIES.verify,
-): RateLimitResult {
+let warned = false;
+function fallback(reason: unknown) {
+  if (warned) return;
+  warned = true;
+  console.error("[rate-limit] GuardState Durable Object unavailable; limits are per instance until it recovers:", reason);
+}
+
+const today = () => new Date().toISOString().slice(0, 10);
+
+/* --------------------------- per-isolate fallback --------------------------- */
+
+const windows = new Map<string, number[]>();
+const localBudget: BudgetSnapshot = { date: "", spentUsd: 0, blocked: 0 };
+
+function localHit(key: string, policy: RateLimitPolicy): RateLimitResult {
   const now = Date.now();
-  const key = `${fingerprint}:${policy.windowMs}:${policy.maxRequests}`;
-  const entry = windows.get(key) ?? { hits: [] };
-  entry.hits = entry.hits.filter((t) => now - t < policy.windowMs);
-
-  if (entry.hits.length >= policy.maxRequests) {
-    windows.set(key, entry);
-    const oldest = entry.hits[0] ?? now;
-    return {
-      allowed: false,
-      remaining: 0,
-      retryAfterMs: Math.max(1000, policy.windowMs - (now - oldest)),
-      limit: policy.maxRequests,
-    };
+  const hits = (windows.get(key) ?? []).filter((t) => now - t < policy.windowMs);
+  if (hits.length >= policy.maxRequests) {
+    windows.set(key, hits);
+    const oldest = hits[0] ?? now;
+    return { allowed: false, remaining: 0, retryAfterMs: Math.max(1000, policy.windowMs - (now - oldest)), limit: policy.maxRequests };
   }
-
-  entry.hits.push(now);
-  windows.set(key, entry);
+  hits.push(now);
+  windows.set(key, hits);
   if (windows.size > 5000) {
-    // crude eviction: drop stale keys
     for (const [k, v] of windows) {
-      if (v.hits.every((t) => now - t > policy.windowMs)) windows.delete(k);
+      if (v.every((t) => now - t > policy.windowMs)) windows.delete(k);
       if (windows.size < 3000) break;
     }
   }
-  return {
-    allowed: true,
-    remaining: policy.maxRequests - entry.hits.length,
-    retryAfterMs: 0,
-    limit: policy.maxRequests,
-  };
+  return { allowed: true, remaining: policy.maxRequests - hits.length, retryAfterMs: 0, limit: policy.maxRequests };
 }
 
-export const DAILY_BUDGET_USD = Number(process.env.SG16_DAILY_BUDGET_USD ?? "12");
+function localBudgetToday(): BudgetSnapshot {
+  if (localBudget.date !== today()) Object.assign(localBudget, { date: today(), spentUsd: 0, blocked: 0 });
+  return localBudget;
+}
 
-export function recordSpend(amountUsd: number) {
-  const today = new Date().toISOString().slice(0, 10);
-  if (dayBudget.date !== today) {
-    dayBudget.date = today;
-    dayBudget.spentUsd = 0;
-    dayBudget.blocked = 0;
+/* --------------------------------- limits --------------------------------- */
+
+export async function consumeRateLimit(fingerprint: string, policy: RateLimitPolicy = POLICIES.verify): Promise<RateLimitResult> {
+  const key = `${fingerprint}:${policy.windowMs}:${policy.maxRequests}`;
+  const namespace = guard();
+  if (namespace) {
+    try {
+      return await namespace.get(namespace.idFromName(`rate:${key}`)).hit(policy.windowMs, policy.maxRequests);
+    } catch (error) {
+      fallback(error);
+    }
   }
-  dayBudget.spentUsd += amountUsd;
+  return localHit(key, policy);
 }
 
-export function budgetState() {
-  const today = new Date().toISOString().slice(0, 10);
-  if (dayBudget.date !== today) return { date: today, spentUsd: 0, blocked: 0 };
-  return { ...dayBudget };
+/* --------------------------------- budget --------------------------------- */
+
+function budgetStub() {
+  const namespace = guard();
+  return namespace?.get(namespace.idFromName("budget"));
 }
 
-export function budgetExhausted(): boolean {
-  return budgetState().spentUsd >= DAILY_BUDGET_USD;
-}
-
-export function noteBudgetBlock() {
-  const today = new Date().toISOString().slice(0, 10);
-  if (dayBudget.date !== today) {
-    dayBudget.date = today;
-    dayBudget.spentUsd = 0;
-    dayBudget.blocked = 0;
+export async function recordSpend(amountUsd: number): Promise<void> {
+  // Free calls do not move the budget; skipping them saves a round trip.
+  if (!(amountUsd > 0)) return;
+  const stub = budgetStub();
+  if (stub) {
+    try {
+      await stub.spend(today(), amountUsd);
+      return;
+    } catch (error) {
+      fallback(error);
+    }
   }
-  dayBudget.blocked += 1;
+  localBudgetToday().spentUsd += amountUsd;
+}
+
+export async function budgetState(): Promise<BudgetSnapshot> {
+  const stub = budgetStub();
+  if (stub) {
+    try {
+      return await stub.budget(today());
+    } catch (error) {
+      fallback(error);
+    }
+  }
+  return { ...localBudgetToday() };
+}
+
+export async function budgetExhausted(): Promise<boolean> {
+  return (await budgetState()).spentUsd >= DAILY_BUDGET_USD;
+}
+
+export async function noteBudgetBlock(): Promise<void> {
+  const stub = budgetStub();
+  if (stub) {
+    try {
+      await stub.block(today());
+      return;
+    } catch (error) {
+      fallback(error);
+    }
+  }
+  localBudgetToday().blocked += 1;
 }
 
 export function requestFingerprint(headers: Headers): string {

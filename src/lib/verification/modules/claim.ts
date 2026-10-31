@@ -5,7 +5,6 @@ import {
   fetchFactChecks,
   searchResultsToEvidence,
   searchWeb,
-  trustTierFor,
 } from "@/lib/providers/research";
 import { CLAIM_HEDGES, OUT_OF_CONTEXT_SIGNALS } from "@/lib/verification/lexicon";
 import {

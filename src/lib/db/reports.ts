@@ -14,7 +14,8 @@ import {
 } from "@/db/schema";
 import type { EngineFlags } from "@/lib/verification/module";
 import type { VerificationReport } from "@/lib/types";
-import { newId, newPublicId, round } from "@/lib/utils";
+import { newId, round } from "@/lib/utils";
+import { setting } from "@/lib/settings";
 
 export const FLAG_KEYS = {
   expensive: "expensive_providers",
@@ -72,7 +73,7 @@ export async function ensureFlagsSeeded(): Promise<void> {
   }
 }
 
-const RETENTION_DAYS = Number(process.env.SG16_RETENTION_DAYS ?? "30");
+const RETENTION_DAYS = Number(setting("SG16_RETENTION_DAYS") ?? "30");
 
 export async function persistReport(report: VerificationReport, ipFingerprint?: string): Promise<void> {
   const expires = new Date(Date.now() + RETENTION_DAYS * 86400000);

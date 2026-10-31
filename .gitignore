@@ -1,7 +1,11 @@
 # ---- dependencies --------------------------------------------------------
 node_modules/
 
-# ---- build output (Next.js, OpenNext, Wrangler) --------------------------
+# ---- build output (Vite, Wrangler; the rest are leftovers of earlier toolchains)
+dist/
+.vite/
+.vinext/
+.cloudflare/
 .next/
 .open-next/
 .wrangler/
