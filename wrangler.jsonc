@@ -4,7 +4,7 @@
 // `vite build` writes the deployable config to dist/; `wrangler deploy` picks it up automatically.
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
-	"name": "sg16-identifier",
+	"name": "sg16-identifier-robo",
 	"main": "./src/worker/index.ts",
 	"compatibility_date": "2026-10-23",
 	// nodejs_compat is needed by the PostgreSQL driver (pg), as Cloudflare documents for Hyperdrive,
@@ -23,6 +23,12 @@
 	"images": {
 		"binding": "IMAGES"
 	},
+	// Workers AI for the universal API (model ids "workers-ai/@cf/..."), enabled
+	// because the dashboard binds it under this name. It always calls
+	// Cloudflare's network, so `npm run dev` then needs `npx wrangler login`.
+	"ai": {
+		"binding": "AI"
+	},
 	// Rate limits and the daily budget, shared by every Worker instance (src/worker/guard.ts).
 	"durable_objects": {
 		"bindings": [{ "name": "GUARD", "class_name": "GuardState" }]
@@ -36,12 +42,9 @@
 	"vars": {
 		"ADMIN_EMAIL": "sg16global@gmail.com"
 	},
-	// Optional bindings the app detects at runtime:
+	// Optional binding the app detects at runtime:
 	//   "hyperdrive": [{ "binding": "HYPERDRIVE", "id": "<id from `npx wrangler hyperdrive create`>" }]
 	//       Pools PostgreSQL connections at the edge; used instead of DATABASE_URL when bound.
-	//   "ai": { "binding": "AI" }
-	//       Workers AI for the universal API (model ids "workers-ai/@cf/..."). It always calls
-	//       Cloudflare's network, so `npm run dev` then needs `npx wrangler login`.
 	//
 	// Secrets (DATABASE_URL, ADMIN_ACCESS_CODE, VITEX_GATEWAY_KEYS, provider API keys) are set
 	// with `npx wrangler secret put <NAME>`, never written here; .dev.vars holds them locally.
