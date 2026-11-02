@@ -13,8 +13,6 @@
     "embed:certificate": "node scripts/embed-certificate.mjs"
   },
   "dependencies": {
-    "drizzle-orm": "0.45.2",
-    "pg": "8.20.0",
     "react": "19.2.6",
     "react-dom": "19.2.6",
     "react-router": "7.18.4"
@@ -24,11 +22,9 @@
     "@eslint/js": "9.39.4",
     "@tailwindcss/postcss": "4.1.17",
     "@types/node": "22.19.15",
-    "@types/pg": "8.18.0",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "6.1.2",
-    "drizzle-kit": "0.31.10",
     "eslint": "9.39.4",
     "eslint-plugin-react-hooks": "7.1.1",
     "eslint-plugin-react-refresh": "0.5.7",

@@ -1,6 +1,4 @@
-import { sql } from "drizzle-orm";
-import { db } from "@/db";
-import { productCatalog, verificationReports } from "@/db/schema";
+import { db, parseJson } from "@/db";
 import { listRecentReports } from "@/lib/db/reports";
 import { getProviderConfigs } from "@/lib/providers/registry";
 import { DAILY_BUDGET_USD, budgetState } from "@/lib/security/rate-limit";
@@ -18,27 +16,28 @@ export async function GET(request: Request) {
       out.recent = await listRecentReports(12);
     }
     if (section === "all" || section === "catalog") {
-      const rows = search
-        ? await db
-            .select()
-            .from(productCatalog)
-            .where(sql`lower(${productCatalog.brand} || ' ' || ${productCatalog.model} || ' ' || ${productCatalog.category}) like ${`%${search.toLowerCase()}%`}`)
-            .limit(60)
-        : await db.select().from(productCatalog).limit(60);
-      out.catalog = rows;
+      const rows = await db.all<Record<string, unknown>>(
+        search
+          ? "select * from product_catalog where lower(brand || ' ' || model || ' ' || category) like ? limit 60"
+          : "select * from product_catalog limit 60",
+        ...(search ? [`%${search.toLowerCase()}%`] : []),
+      );
+      // JSON columns come back as TEXT; parse them for the client.
+      out.catalog = rows.map((r) => ({
+        ...r,
+        identifiers: parseJson(r.identifiers),
+        specs: parseJson(r.specs),
+        known_counterfeit_signals: parseJson(r.known_counterfeit_signals),
+      }));
     }
     if (section === "all" || section === "stats") {
-      const totals = await db
-        .select({
-          reports: sql<number>`count(*)::int`,
-          cost: sql<number>`coalesce(sum(cost_usd),0)::float`,
-          avgLatency: sql<number>`coalesce(avg(latency_ms),0)::float`,
-        })
-        .from(verificationReports);
+      const totals = await db.first<{ reports: number; cost: number; avgLatency: number }>(
+        "select count(*) as reports, coalesce(sum(cost_usd), 0) as cost, coalesce(avg(latency_ms), 0) as avgLatency from verification_reports",
+      );
       out.stats = {
-        reports: totals[0]?.reports ?? 0,
-        cost: totals[0]?.cost ?? 0,
-        avgLatency: Math.round(totals[0]?.avgLatency ?? 0),
+        reports: totals?.reports ?? 0,
+        cost: totals?.cost ?? 0,
+        avgLatency: Math.round(totals?.avgLatency ?? 0),
       };
     }
   } catch (error) {

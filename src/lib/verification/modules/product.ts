@@ -1,5 +1,4 @@
-import { db } from "@/db";
-import { productCatalog } from "@/db/schema";
+import { db, json, parseJson } from "@/db";
 import type { EvidenceSource, ProviderCall, ReportFinding, RetailLink } from "@/lib/types";
 import { CATALOG_SEED, matchCatalog, type CatalogEntry } from "@/lib/identifiers/catalog";
 import { inspectBarcode, inspectImei, modelCodesInText, normalizeModel } from "@/lib/identifiers/checksums";
@@ -61,20 +60,20 @@ function specValues(text: string, re: RegExp, scale?: Record<string, number>): n
 
 async function loadCatalog(): Promise<{ entries: CatalogEntry[]; fromDb: boolean }> {
   try {
-    const rows = await db.select().from(productCatalog).limit(400);
+    const rows = await db.all<Record<string, unknown>>("select * from product_catalog limit 400");
     if (rows.length) {
       return {
         fromDb: true,
         entries: rows.map((r) => ({
-          brand: r.brand,
-          model: r.model,
-          family: r.family ?? undefined,
-          category: r.category,
-          identifiers: (r.identifiers as CatalogEntry["identifiers"]) ?? { models: [] },
-          specs: (r.specs as Record<string, string>) ?? {},
-          knownCounterfeitSignals: (r.knownCounterfeitSignals as string[]) ?? [],
-          officialUrl: r.officialUrl ?? "",
-          source: r.source,
+          brand: r.brand as string,
+          model: r.model as string,
+          family: (r.family as string | null) ?? undefined,
+          category: r.category as string,
+          identifiers: (parseJson<CatalogEntry["identifiers"]>(r.identifiers) ?? { models: [] }),
+          specs: (parseJson<Record<string, string>>(r.specs) ?? {}),
+          knownCounterfeitSignals: (parseJson<string[]>(r.known_counterfeit_signals) ?? []),
+          officialUrl: (r.official_url as string | null) ?? "",
+          source: r.source as string,
         })),
       };
     }
@@ -439,22 +438,25 @@ export async function verifyProduct(input: ModuleInput): Promise<ModuleOutput> {
 
 export async function ensureCatalogSeeded(): Promise<number> {
   try {
-    const existing = await db.select({ id: productCatalog.id }).from(productCatalog).limit(1);
-    if (existing.length) return 0;
-    await db.insert(productCatalog).values(
-      CATALOG_SEED.map((e) => ({
-        id: newId(),
-        brand: e.brand,
-        model: e.model,
-        family: e.family ?? null,
-        category: e.category,
-        identifiers: e.identifiers,
-        specs: e.specs,
-        knownCounterfeitSignals: e.knownCounterfeitSignals,
-        officialUrl: e.officialUrl,
-        source: e.source,
-      })),
-    );
+    const existing = await db.first("select id from product_catalog limit 1");
+    if (existing) return 0;
+    for (const e of CATALOG_SEED) {
+      await db.run(
+        `insert or ignore into product_catalog
+          (id, brand, model, family, category, identifiers, specs, known_counterfeit_signals, official_url, source)
+         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        newId(),
+        e.brand,
+        e.model,
+        e.family ?? null,
+        e.category,
+        json(e.identifiers),
+        json(e.specs),
+        json(e.knownCounterfeitSignals ?? null),
+        e.officialUrl ?? null,
+        e.source,
+      );
+    }
     return CATALOG_SEED.length;
   } catch {
     return 0;

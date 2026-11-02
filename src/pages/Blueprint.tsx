@@ -30,7 +30,7 @@ const SECTIONS = [
 ];
 
 const ENV_VARS = [
-  ["DATABASE_URL", "required", "PostgreSQL connection string used by Drizzle."],
+  ["DB (D1 binding)", "required", "Cloudflare D1 database `sg16-identifier-robo-db` bound in wrangler.jsonc; schema in migrations/0001_init.sql (applied by `wrangler deploy`)."],
   ["ADMIN_ACCESS_CODE", "required", "Code required by /api/admin. Without it the admin console is disabled."],
   ["GOOGLE_FACTCHECK_API_KEY", "optional", "Enables the Google Fact Check Tools API adapter."],
   ["WEB_RISK_API_KEY", "optional", "Enables commercial URL reputation via Google Web Risk."],
@@ -74,7 +74,7 @@ const PROJECT_TREE = `sg16identifier/
 │   │   ├── guard.ts                  # Durable Object: rate limits + daily budget
 │   │   ├── html.ts                   # per-page title/description, HTTP 404
 │   │   └── routes/                   # verify · report · meta · stats · engage · admin · health · image · v1
-│   ├── db/                           # drizzle client + schema
+│   ├── db/                           # D1 (SQLite) query helper
 │   └── lib/
 │       ├── verification/
 │       │   ├── engine.ts             # orchestration
@@ -91,14 +91,14 @@ const PROJECT_TREE = `sg16identifier/
 │       ├── db/                       # report persistence + flags
 │       └── types.ts                  # report contract
 ├── vite.config.ts                    # Vite: React app + Cloudflare Worker
-├── wrangler.jsonc                    # Worker, assets, Durable Object, Images
-├── drizzle.config.json
+├── wrangler.jsonc                    # Worker, assets, D1 database, Durable Object, Images
+├── migrations/                       # D1 schema migrations (0001_init.sql)
 ├── .env.example
 └── package.json`;
 
 const DEPLOY_STEPS = [
   ["01", "Create the repository", "Application code in Git with separate development and production configurations. No secret ever committed."],
-  ["02", "Provision the database", "Create PostgreSQL tables, apply migrations with drizzle-kit push, configure access policies and rehearse a backup restoration."],
+  ["02", "Provision the database", "Create the D1 database sg16-identifier-robo-db and bind it in wrangler.jsonc; `wrangler deploy` applies migrations/0001_init.sql automatically. Rehearse a backup restoration (D1 export)."],
   ["03", "Configure integrations", "Add provider credentials to the host secret manager. Set per-provider quotas and a daily spend alert."],
   ["04", "Deploy to staging", "Run functional tests, security tests and end-to-end verification scenarios against test data before anything public."],
   ["05", "Connect the domain", "Configure the DNS records your host requires, enable HTTPS, verify the canonical domain and its redirects."],

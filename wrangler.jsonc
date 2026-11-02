@@ -7,8 +7,7 @@
 	"name": "sg16-identifier-robo",
 	"main": "./src/worker/index.ts",
 	"compatibility_date": "2026-10-23",
-	// nodejs_compat is needed by the PostgreSQL driver (pg), as Cloudflare documents for Hyperdrive,
-	// and provides AsyncLocalStorage. App code imports no node:fs/dns/tls/net.
+	// nodejs_compat provides AsyncLocalStorage (per-request scope). App code imports no node:fs/dns/tls/net.
 	"compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
 	"assets": {
 		// Filled from Vite's client build at build time.
@@ -34,6 +33,17 @@
 		"bindings": [{ "name": "GUARD", "class_name": "GuardState" }]
 	},
 	"migrations": [{ "tag": "v1", "new_sqlite_classes": ["GuardState"] }],
+	// D1 (SQLite): report history, corrections queue, catalogue, provider usage,
+	// service flags and the audit log (schema in migrations/0001_init.sql, applied
+	// automatically by `wrangler deploy`).
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "sg16-identifier-robo-db",
+			"database_id": "0baa307f-dfd6-4a44-a129-d1dfbe34e28e",
+			"migrations_dir": "migrations"
+		}
+	],
 	"observability": {
 		"enabled": true
 	},
@@ -42,10 +52,6 @@
 	"vars": {
 		"ADMIN_EMAIL": "sg16global@gmail.com"
 	},
-	// Optional binding the app detects at runtime:
-	//   "hyperdrive": [{ "binding": "HYPERDRIVE", "id": "<id from `npx wrangler hyperdrive create`>" }]
-	//       Pools PostgreSQL connections at the edge; used instead of DATABASE_URL when bound.
-	//
-	// Secrets (DATABASE_URL, ADMIN_ACCESS_CODE, VITEX_GATEWAY_KEYS, provider API keys) are set
+	// Secrets (ADMIN_ACCESS_CODE, VITEX_GATEWAY_KEYS, provider API keys) are set
 	// with `npx wrangler secret put <NAME>`, never written here; .dev.vars holds them locally.
 }

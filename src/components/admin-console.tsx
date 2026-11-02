@@ -205,9 +205,9 @@ export function AdminConsole() {
       {data.dbAvailable === false && (
         <div className="flex items-start gap-2 rounded-sm border border-warn-500/40 bg-warn-500/8 p-3 text-[12.5px] text-warn-400" role="status">
           <IconAlert className="mt-0.5 h-4 w-4 shrink-0" />
-          Database unavailable (no working DATABASE_URL) — console is in degraded mode. Unlock, permanent-code
-          rotation and the budget still work (stored in the Guard object); report history, the corrections queue
-          and the switches need Postgres.
+          Database unavailable (D1 binding DB missing or not migrated) — console is in degraded mode. Unlock,
+          permanent-code rotation and the budget still work (stored in the Guard object); report history, the
+          corrections queue and the switches need D1.
         </div>
       )}
 

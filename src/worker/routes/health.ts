@@ -1,6 +1,4 @@
 import { db } from "@/db";
-import { sql } from "drizzle-orm";
-import { productCatalog, verificationReports } from "@/db/schema";
 import { getProviderConfigs } from "@/lib/providers/registry";
 import { getFlagStates } from "@/lib/db/reports";
 import { budgetState, DAILY_BUDGET_USD } from "@/lib/security/rate-limit";
@@ -16,7 +14,7 @@ export async function GET() {
   let catalog = 0;
 
   try {
-    await db.execute(sql`select 1`);
+    await db.first("select 1 as ok");
     database = true;
   } catch {
     database = false;
@@ -25,11 +23,11 @@ export async function GET() {
   if (database) {
     try {
       const [r, c] = await Promise.all([
-        db.select({ count: sql<number>`count(*)::int` }).from(verificationReports),
-        db.select({ count: sql<number>`count(*)::int` }).from(productCatalog),
+        db.first<{ count: number }>("select count(*) as count from verification_reports"),
+        db.first<{ count: number }>("select count(*) as count from product_catalog"),
       ]);
-      reports = r[0]?.count ?? 0;
-      catalog = c[0]?.count ?? 0;
+      reports = r?.count ?? 0;
+      catalog = c?.count ?? 0;
     } catch {
       // Tables not yet migrated — liveness still holds.
     }

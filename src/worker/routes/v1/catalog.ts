@@ -1,6 +1,4 @@
-import { and, sql } from "drizzle-orm";
-import { db } from "@/db";
-import { productCatalog } from "@/db/schema";
+import { db, parseJson } from "@/db";
 import { admit, errorResponse, jsonResponse, preflight } from "@/lib/universal/gateway";
 
 type Ctx = { params: Promise<{ brand: string; model: string }> };
@@ -15,13 +13,21 @@ export async function GET(request: Request, ctx: Ctx) {
     return errorResponse(request, 400, "Brand and model are required.", "invalid_request_error");
   }
   try {
-    const rows = await db
-      .select()
-      .from(productCatalog)
-      .where(and(sql`lower(${productCatalog.brand}) = ${brand.trim().toLowerCase()}`, sql`lower(${productCatalog.model}) = ${model.trim().toLowerCase()}`))
-      .limit(1);
-    if (!rows[0]) return errorResponse(request, 404, `No catalogue record for ${brand} ${model}.`, "not_found");
-    return jsonResponse(request, { ok: true, record: rows[0] });
+    const row = await db.first<Record<string, unknown>>(
+      "select * from product_catalog where lower(brand) = ? and lower(model) = ? limit 1",
+      brand.trim().toLowerCase(),
+      model.trim().toLowerCase(),
+    );
+    if (!row) return errorResponse(request, 404, `No catalogue record for ${brand} ${model}.`, "not_found");
+    return jsonResponse(request, {
+      ok: true,
+      record: {
+        ...row,
+        identifiers: parseJson(row.identifiers),
+        specs: parseJson(row.specs),
+        known_counterfeit_signals: parseJson(row.known_counterfeit_signals),
+      },
+    });
   } catch (error) {
     return errorResponse(request, 500, (error as Error).message, "server_error");
   }

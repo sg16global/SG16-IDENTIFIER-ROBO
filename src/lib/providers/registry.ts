@@ -1,5 +1,4 @@
 import { db } from "@/db";
-import { providerUsage } from "@/db/schema";
 import type { ProviderCall } from "@/lib/types";
 import { newId, round } from "@/lib/utils";
 import { recordSpend } from "@/lib/security/rate-limit";
@@ -169,19 +168,22 @@ export function recordProviderCall(call: ProviderCall, reportId?: string): Promi
 async function persistUsage(call: ProviderCall, reportId?: string) {
   await recordSpend(call.costUsd);
   try {
-    await db.insert(providerUsage).values({
-      id: newId(),
-      reportId: reportId ?? null,
-      // Column widths (schema.ts); a longer model id must not drop the row.
-      provider: call.provider.slice(0, 48),
-      operation: call.operation.slice(0, 64),
-      status: call.status === "ok" ? "ok" : call.status,
-      latencyMs: call.latencyMs,
-      tokensIn: call.tokensIn ?? null,
-      tokensOut: call.tokensOut ?? null,
-      costUsd: round(call.costUsd, 6),
-      error: call.error ?? null,
-    });
+    await db.run(
+      `insert into provider_usage
+        (id, report_id, provider, operation, status, latency_ms, tokens_in, tokens_out, cost_usd, error)
+       values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      newId(),
+      reportId ?? null,
+      // Column widths (migrations/0001_init.sql); a longer model id must not drop the row.
+      call.provider.slice(0, 48),
+      call.operation.slice(0, 64),
+      call.status === "ok" ? "ok" : call.status,
+      call.latencyMs,
+      call.tokensIn ?? null,
+      call.tokensOut ?? null,
+      round(call.costUsd, 6),
+      call.error ?? null,
+    );
   } catch {
     // usage logging must never break a verification
   }

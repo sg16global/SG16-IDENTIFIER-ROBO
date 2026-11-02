@@ -1,21 +1,13 @@
-import { and, desc, eq, sql } from "drizzle-orm";
-import { db } from "@/db";
-import {
-  auditEvents,
-  businessAccounts,
-  evidenceSources,
-  feedback,
-  newsletterSubscribers,
-  productCatalog,
-  providerUsage,
-  reportFindings,
-  serviceFlags,
-  verificationReports,
-} from "@/db/schema";
+import { db, json, parseJson } from "@/db";
 import type { EngineFlags } from "@/lib/verification/module";
 import type { VerificationReport } from "@/lib/types";
 import { newId, round } from "@/lib/utils";
 import { setting } from "@/lib/settings";
+
+/*
+ * Report/queue persistence on D1 (SQLite). Same exports as before, now raw SQL
+ * through the helper in src/db/index.ts — no ORM. JSON columns are TEXT.
+ */
 
 export const FLAG_KEYS = {
   expensive: "expensive_providers",
@@ -35,8 +27,8 @@ export async function getFlagStates(): Promise<Record<string, boolean>> {
   const out: Record<string, boolean> = {};
   for (const [k, v] of Object.entries(DEFAULTS)) out[k] = v.enabled;
   try {
-    const rows = await db.select().from(serviceFlags);
-    for (const row of rows) out[row.key] = row.enabled;
+    const rows = await db.all<{ key: string; enabled: number }>("select key, enabled from service_flags");
+    for (const row of rows) out[row.key] = row.enabled === 1;
   } catch {
     /* database unavailable — safe defaults apply */
   }
@@ -53,20 +45,22 @@ export async function getEngineFlags(): Promise<EngineFlags> {
 }
 
 export async function setFlag(key: string, enabled: boolean, actor = "admin"): Promise<void> {
-  await db
-    .insert(serviceFlags)
-    .values({ key, enabled, detail: DEFAULTS[key]?.detail ?? null, updatedAt: new Date() })
-    .onConflictDoUpdate({ target: serviceFlags.key, set: { enabled, updatedAt: new Date() } });
-  await db.insert(auditEvents).values({ id: newId(), actor, action: `flag:${key}`, meta: { enabled } });
+  const now = new Date().toISOString();
+  await db.run(
+    `insert into service_flags (key, enabled, detail, updated_at) values (?, ?, ?, ?)
+     on conflict(key) do update set enabled = excluded.enabled, detail = excluded.detail, updated_at = excluded.updated_at`,
+    key,
+    enabled,
+    DEFAULTS[key]?.detail ?? null,
+    now,
+  );
+  await db.run("insert into audit_events (id, actor, action, meta) values (?, ?, ?, ?)", newId(), actor, `flag:${key}`, json({ enabled }));
 }
 
 export async function ensureFlagsSeeded(): Promise<void> {
   try {
     for (const [key, value] of Object.entries(DEFAULTS)) {
-      await db
-        .insert(serviceFlags)
-        .values({ key, enabled: value.enabled, detail: value.detail })
-        .onConflictDoNothing();
+      await db.run("insert or ignore into service_flags (key, enabled, detail) values (?, ?, ?)", key, value.enabled, value.detail);
     }
   } catch {
     /* non-fatal */
@@ -76,62 +70,69 @@ export async function ensureFlagsSeeded(): Promise<void> {
 const RETENTION_DAYS = Number(setting("SG16_RETENTION_DAYS") ?? "30");
 
 export async function persistReport(report: VerificationReport, ipFingerprint?: string): Promise<void> {
-  const expires = new Date(Date.now() + RETENTION_DAYS * 86400000);
+  const expires = new Date(Date.now() + RETENTION_DAYS * 86400000).toISOString();
   try {
-    await db.insert(verificationReports).values({
-      id: report.reportId,
-      publicId: report.publicId,
-      category: report.category,
-      status: report.status,
-      confidence: report.confidence,
-      summary: report.summary,
-      inputText: report.input.text ? report.input.text.slice(0, 4000) : null,
-      inputUrl: report.input.url ?? null,
-      inputKind: report.input.kind,
-      payload: report.payload ?? {},
-      workflow: report.workflow,
-      limitations: report.limitations,
-      nextSteps: report.nextSteps,
-      shareable: false,
-      latencyMs: report.latencyMs,
-      costUsd: round(report.costUsd, 6),
-      providersUsed: report.providers,
-      ipFingerprint: ipFingerprint ?? null,
-      checkedAt: new Date(report.checkedAt),
-      retentionExpiresAt: expires,
-    });
+    await db.run(
+      `insert into verification_reports
+        (id, public_id, category, status, confidence, summary, input_text, input_url, input_kind,
+         payload, workflow, limitations, next_steps, shareable, latency_ms, cost_usd, providers_used,
+         ip_fingerprint, checked_at, retention_expires_at)
+       values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)`,
+      report.reportId,
+      report.publicId,
+      report.category,
+      report.status,
+      report.confidence,
+      report.summary,
+      report.input.text ? report.input.text.slice(0, 4000) : null,
+      report.input.url ?? null,
+      report.input.kind,
+      json(report.payload ?? {}),
+      json(report.workflow),
+      json(report.limitations),
+      json(report.nextSteps),
+      report.latencyMs,
+      round(report.costUsd, 6),
+      json(report.providers),
+      ipFingerprint ?? null,
+      new Date(report.checkedAt).toISOString(),
+      expires,
+    );
 
-    if (report.sources.length) {
-      await db.insert(evidenceSources).values(
-        report.sources.map((s) => ({
-          id: newId(),
-          reportId: report.reportId,
-          provider: s.provider,
-          url: s.url ?? null,
-          title: s.title ?? null,
-          publisher: s.publisher ?? null,
-          excerpt: s.excerpt ? s.excerpt.slice(0, 4000) : null,
-          stance: s.stance,
-          publishedAt: s.publishedAt ? new Date(s.publishedAt) : null,
-          retrievedAt: new Date(s.retrievedAt),
-          trustTier: s.trustTier ?? null,
-          meta: s.meta ?? null,
-        })),
+    for (const s of report.sources) {
+      await db.run(
+        `insert into evidence_sources
+          (id, report_id, provider, url, title, publisher, excerpt, stance, published_at, retrieved_at, trust_tier, meta)
+         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        newId(),
+        report.reportId,
+        s.provider,
+        s.url ?? null,
+        s.title ?? null,
+        s.publisher ?? null,
+        s.excerpt ? s.excerpt.slice(0, 4000) : null,
+        s.stance,
+        s.publishedAt ? new Date(s.publishedAt).toISOString() : null,
+        new Date(s.retrievedAt).toISOString(),
+        s.trustTier ?? null,
+        json(s.meta ?? null),
       );
     }
-    if (report.findings.length) {
-      await db.insert(reportFindings).values(
-        report.findings.map((f, i) => ({
-          id: newId(),
-          reportId: report.reportId,
-          kind: f.kind,
-          title: f.title,
-          detail: f.detail.slice(0, 4000),
-          severity: f.severity,
-          weight: f.weight,
-          sourceRefs: f.sourceRefs ?? [],
-          position: i,
-        })),
+    for (let i = 0; i < report.findings.length; i++) {
+      const f = report.findings[i];
+      await db.run(
+        `insert into report_findings
+          (id, report_id, kind, title, detail, severity, weight, source_refs, position)
+         values (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        newId(),
+        report.reportId,
+        f.kind,
+        f.title,
+        f.detail.slice(0, 4000),
+        f.severity,
+        f.weight,
+        json(f.sourceRefs ?? []),
+        i,
       );
     }
   } catch {
@@ -139,32 +140,71 @@ export async function persistReport(report: VerificationReport, ipFingerprint?: 
   }
 }
 
+interface ReportRow {
+  id: string;
+  public_id: string;
+  category: string;
+  status: string;
+  confidence: number | null;
+  summary: string;
+  input_text: string | null;
+  input_url: string | null;
+  input_kind: string | null;
+  payload: string | null;
+  workflow: string | null;
+  limitations: string | null;
+  next_steps: string | null;
+  flagged: number;
+  latency_ms: number | null;
+  cost_usd: number;
+  providers_used: string | null;
+  checked_at: string;
+}
+
+interface SourceRow {
+  provider: string;
+  url: string | null;
+  title: string | null;
+  publisher: string | null;
+  excerpt: string | null;
+  stance: string;
+  published_at: string | null;
+  retrieved_at: string;
+  trust_tier: string | null;
+  meta: string | null;
+}
+
+interface FindingRow {
+  kind: string;
+  title: string;
+  detail: string;
+  severity: string;
+  weight: number;
+  source_refs: string | null;
+  position: number;
+}
+
 export async function loadReport(publicId: string): Promise<VerificationReport | null> {
-  const rows = await db
-    .select()
-    .from(verificationReports)
-    .where(eq(verificationReports.publicId, publicId.toUpperCase()))
-    .limit(1);
-  const row = rows[0];
+  const row = await db.first<ReportRow>("select * from verification_reports where public_id = ? limit 1", publicId.toUpperCase());
   if (!row) return null;
 
   const [srcRows, fndRows] = await Promise.all([
-    db.select().from(evidenceSources).where(eq(evidenceSources.reportId, row.id)),
-    db.select().from(reportFindings).where(eq(reportFindings.reportId, row.id)),
+    db.all<SourceRow>("select * from evidence_sources where report_id = ?", row.id),
+    db.all<FindingRow>("select * from report_findings where report_id = ?", row.id),
   ]);
 
   return {
     reportId: row.id,
-    publicId: row.publicId,
+    publicId: row.public_id,
     category: row.category as VerificationReport["category"],
     status: row.status as VerificationReport["status"],
     confidence: row.confidence,
     summary: row.summary,
-    headline: (row.payload as { headline?: string })?.headline ?? row.summary.split(".")[0],
+    headline: parseJson<{ headline?: string }>(row.payload)?.headline ?? row.summary.split(".")[0],
     input: {
-      kind: row.inputKind ?? "text",
-      text: row.inputText ?? undefined,
-      url: row.inputUrl ?? undefined,
+      kind: row.input_kind ?? "text",
+      text: row.input_text ?? undefined,
+      url: row.input_url ?? undefined,
     },
     findings: fndRows
       .sort((a, b) => a.position - b.position)
@@ -174,7 +214,7 @@ export async function loadReport(publicId: string): Promise<VerificationReport |
         detail: f.detail,
         severity: f.severity as "info",
         weight: f.weight,
-        sourceRefs: (f.sourceRefs as number[]) ?? [],
+        sourceRefs: parseJson<number[]>(f.source_refs) ?? [],
       })),
     sources: srcRows
       .filter((s) => s.provider !== "_finding")
@@ -185,73 +225,79 @@ export async function loadReport(publicId: string): Promise<VerificationReport |
         publisher: s.publisher ?? undefined,
         excerpt: s.excerpt ?? undefined,
         stance: s.stance as "context",
-        publishedAt: s.publishedAt?.toISOString() ?? null,
-        retrievedAt: s.retrievedAt.toISOString(),
-        trustTier: (s.trustTier as "official") ?? undefined,
-        meta: (s.meta as Record<string, unknown>) ?? undefined,
+        publishedAt: s.published_at,
+        retrievedAt: s.retrieved_at,
+        trustTier: (s.trust_tier as "official") ?? undefined,
+        meta: parseJson<Record<string, unknown>>(s.meta) ?? undefined,
       })),
-    limitations: (row.limitations as string[]) ?? [],
-    nextSteps: (row.nextSteps as string[]) ?? [],
-    payload: (row.payload as Record<string, unknown>) ?? {},
-    workflow: (row.workflow as VerificationReport["workflow"]) ?? [],
-    providers: (row.providersUsed as VerificationReport["providers"]) ?? [],
-    checkedAt: row.checkedAt.toISOString(),
-    latencyMs: row.latencyMs ?? 0,
-    costUsd: row.costUsd ?? 0,
+    limitations: parseJson<string[]>(row.limitations) ?? [],
+    nextSteps: parseJson<string[]>(row.next_steps) ?? [],
+    payload: parseJson<Record<string, unknown>>(row.payload) ?? {},
+    workflow: parseJson<VerificationReport["workflow"]>(row.workflow) ?? [],
+    providers: parseJson<VerificationReport["providers"]>(row.providers_used) ?? [],
+    checkedAt: row.checked_at,
+    latencyMs: row.latency_ms ?? 0,
+    costUsd: row.cost_usd ?? 0,
   };
 }
 
 export async function listRecentReports(limit = 12) {
-  return db
-    .select({
-      publicId: verificationReports.publicId,
-      category: verificationReports.category,
-      status: verificationReports.status,
-      confidence: verificationReports.confidence,
-      summary: verificationReports.summary,
-      inputKind: verificationReports.inputKind,
-      checkedAt: verificationReports.checkedAt,
-    })
-    .from(verificationReports)
-    .orderBy(desc(verificationReports.checkedAt))
-    .limit(limit);
+  return db.all<{
+    publicId: string;
+    category: string;
+    status: string;
+    confidence: number | null;
+    summary: string;
+    inputKind: string | null;
+    checkedAt: string;
+  }>(
+    `select public_id as publicId, category, status, confidence, summary, input_kind as inputKind, checked_at as checkedAt
+     from verification_reports order by checked_at desc limit ?`,
+    limit,
+  );
 }
 
 export async function adminStats() {
   const [totals, byCategory, byStatus, usage, fb, catalogCount, businesses, subs, flags] = await Promise.all([
-    db.select({ count: sql<number>`count(*)::int`, cost: sql<number>`coalesce(sum(cost_usd),0)::float` }).from(verificationReports),
-    db.select({ category: verificationReports.category, count: sql<number>`count(*)::int` })
-      .from(verificationReports).groupBy(verificationReports.category),
-    db.select({ status: verificationReports.status, count: sql<number>`count(*)::int` })
-      .from(verificationReports).groupBy(verificationReports.status),
-    db.select({
-      provider: providerUsage.provider,
-      calls: sql<number>`count(*)::int`,
-      cost: sql<number>`coalesce(sum(cost_usd),0)::float`,
-      errors: sql<number>`coalesce(sum(case when status = 'error' then 1 else 0 end),0)::int`,
-      avgLatency: sql<number>`coalesce(avg(latency_ms),0)::float`,
-    }).from(providerUsage).groupBy(providerUsage.provider),
-    db.select({ status: feedback.status, count: sql<number>`count(*)::int` }).from(feedback).groupBy(feedback.status),
-    db.select({ count: sql<number>`count(*)::int` }).from(productCatalog),
-    db.select({ count: sql<number>`count(*)::int` }).from(businessAccounts),
-    db.select({ count: sql<number>`count(*)::int` }).from(newsletterSubscribers),
-    db.select().from(serviceFlags),
+    db.first<{ count: number; cost: number }>("select count(*) as count, coalesce(sum(cost_usd), 0) as cost from verification_reports"),
+    db.all<{ category: string; count: number }>("select category, count(*) as count from verification_reports group by category"),
+    db.all<{ status: string; count: number }>("select status, count(*) as count from verification_reports group by status"),
+    db.all<{ provider: string; calls: number; cost: number; errors: number; avgLatency: number }>(
+      `select provider, count(*) as calls, coalesce(sum(cost_usd), 0) as cost,
+              coalesce(sum(case when status = 'error' then 1 else 0 end), 0) as errors,
+              coalesce(avg(latency_ms), 0) as avgLatency
+       from provider_usage group by provider`,
+    ),
+    db.all<{ status: string; count: number }>("select status, count(*) as count from feedback group by status"),
+    db.first<{ count: number }>("select count(*) as count from product_catalog"),
+    db.first<{ count: number }>("select count(*) as count from business_accounts"),
+    db.first<{ count: number }>("select count(*) as count from newsletter_subscribers"),
+    db.all<{ key: string; enabled: number; detail: string | null; updated_at: string }>("select * from service_flags"),
   ]);
 
-  return { totals: totals[0], byCategory, byStatus, usage, feedback: fb, catalogCount: catalogCount[0]?.count ?? 0, businesses: businesses[0]?.count ?? 0, subscribers: subs[0]?.count ?? 0, flags };
+  return {
+    totals: totals ?? { count: 0, cost: 0 },
+    byCategory,
+    byStatus,
+    usage,
+    feedback: fb,
+    catalogCount: catalogCount?.count ?? 0,
+    businesses: businesses?.count ?? 0,
+    subscribers: subs?.count ?? 0,
+    flags: flags.map((f) => ({ key: f.key, enabled: f.enabled === 1, detail: f.detail, updatedAt: f.updated_at })),
+  };
 }
 
+const FEEDBACK_COLS = "id, report_id as reportId, public_id as publicId, kind, message, contact, status, created_at as createdAt";
+
 export async function listFeedback(status?: string) {
-  return db
-    .select()
-    .from(feedback)
-    .where(status ? eq(feedback.status, status) : sql`true`)
-    .orderBy(desc(feedback.createdAt))
-    .limit(100);
+  return status
+    ? db.all(`select ${FEEDBACK_COLS} from feedback where status = ? order by created_at desc limit 100`, status)
+    : db.all(`select ${FEEDBACK_COLS} from feedback order by created_at desc limit 100`);
 }
 
 export async function listRecentAudit(limit = 40) {
-  return db.select().from(auditEvents).orderBy(desc(auditEvents.createdAt)).limit(limit);
+  return db.all(`select id, actor, action, meta, created_at as createdAt from audit_events order by created_at desc limit ?`, limit);
 }
 
 export async function recordFeedback(values: {
@@ -261,23 +307,32 @@ export async function recordFeedback(values: {
   message?: string | null;
   contact?: string | null;
 }) {
-  await db.insert(feedback).values({
-    id: newId(),
-    reportId: values.reportId ?? null,
-    publicId: values.publicId ?? null,
-    kind: values.kind,
-    message: values.message ? values.message.slice(0, 2000) : null,
-    contact: values.contact ?? null,
-    status: "new",
-  });
+  await db.run(
+    "insert into feedback (id, report_id, public_id, kind, message, contact, status) values (?, ?, ?, ?, ?, ?, 'new')",
+    newId(),
+    values.reportId ?? null,
+    values.publicId ?? null,
+    values.kind,
+    values.message ? values.message.slice(0, 2000) : null,
+    values.contact ?? null,
+  );
   if (values.reportId) {
-    await db.update(verificationReports).set({ flagged: true }).where(eq(verificationReports.id, values.reportId));
+    await db.run("update verification_reports set flagged = 1 where id = ?", values.reportId);
   }
 }
 
 export async function purgeExpiredReports(): Promise<number> {
-  const result = await db
-    .delete(verificationReports)
-    .where(and(sql`${verificationReports.retentionExpiresAt} is not null`, sql`${verificationReports.retentionExpiresAt} < now()`));
-  return (result as unknown as { rowCount?: number })?.rowCount ?? 0;
+  const now = new Date().toISOString();
+  const expired = await db.all<{ id: string }>(
+    "select id from verification_reports where retention_expires_at is not null and retention_expires_at < ?",
+    now,
+  );
+  if (!expired.length) return 0;
+  const ids = expired.map((r) => r.id);
+  const placeholders = ids.map(() => "?").join(", ");
+  // Children first, then the reports (FK cascade is not relied on).
+  await db.run(`delete from evidence_sources where report_id in (${placeholders})`, ...ids);
+  await db.run(`delete from report_findings where report_id in (${placeholders})`, ...ids);
+  const res = await db.run(`delete from verification_reports where id in (${placeholders})`, ...ids);
+  return res.changes;
 }

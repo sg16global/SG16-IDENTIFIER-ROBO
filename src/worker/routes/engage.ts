@@ -1,5 +1,4 @@
-import { db } from "@/db";
-import { affiliateEvents, auditEvents, businessAccounts, newsletterSubscribers } from "@/db/schema";
+import { db, json } from "@/db";
 import { POLICIES, consumeRateLimit, requestFingerprint } from "@/lib/security/rate-limit";
 import { parseUntrustedUrl } from "@/lib/security/url-guard";
 import { newId } from "@/lib/utils";
@@ -27,14 +26,14 @@ export async function POST(request: Request) {
     const destination = String(body.destination ?? "");
     const guard = parseUntrustedUrl(destination);
     if (!guard.ok) return Response.json({ ok: false, error: guard.reason }, { status: 400 });
-    await db.insert(affiliateEvents).values({
-      id: newId(),
-      reportId: body.reportId ? String(body.reportId).slice(0, 64) : null,
-      retailer: String(body.retailer ?? "unknown").slice(0, 96),
-      productRef: String(body.productRef ?? "").slice(0, 160),
-      destination: guard.url!.toString(),
-      disclosed: true,
-    });
+    await db.run(
+      "insert into affiliate_events (id, report_id, retailer, product_ref, destination, disclosed) values (?, ?, ?, ?, ?, 1)",
+      newId(),
+      body.reportId ? String(body.reportId).slice(0, 64) : null,
+      String(body.retailer ?? "unknown").slice(0, 96),
+      String(body.productRef ?? "").slice(0, 160),
+      guard.url!.toString(),
+    );
     return Response.json({ ok: true, disclosed: true, destination: guard.url!.toString() });
   }
 
@@ -45,10 +44,12 @@ export async function POST(request: Request) {
     if (!EMAIL_RE.test(email) || email.length > 220) {
       return Response.json({ ok: false, error: "Enter a valid email address." }, { status: 400 });
     }
-    await db
-      .insert(newsletterSubscribers)
-      .values({ id: newId(), email, interest: body.interest ? String(body.interest).slice(0, 64) : null })
-      .onConflictDoNothing();
+    await db.run(
+      "insert or ignore into newsletter_subscribers (id, email, interest) values (?, ?, ?)",
+      newId(),
+      email,
+      body.interest ? String(body.interest).slice(0, 64) : null,
+    );
     return Response.json({ ok: true, message: "Subscribed. No tracking pixels, no resale of your address." });
   }
 
@@ -63,21 +64,21 @@ export async function POST(request: Request) {
     if (!EMAIL_RE.test(email)) {
       return Response.json({ ok: false, error: "A valid work email is required." }, { status: 400 });
     }
-    await db.insert(businessAccounts).values({
-      id: newId(),
+    await db.run(
+      `insert into business_accounts (id, organization, contact_email, plan, monthly_quota, status, notes)
+       values (?, ?, ?, ?, ?, 'pending', ?)`,
+      newId(),
       organization,
-      contactEmail: email,
-      plan: String(body.plan ?? "starter").slice(0, 32),
-      monthlyQuota: Number(body.quota ?? 1000),
-      status: "pending",
-      notes: body.notes ? String(body.notes).slice(0, 2000) : null,
-    });
-    await db.insert(auditEvents).values({
-      id: newId(),
-      actor: "public",
-      action: "business-interest",
-      meta: { organization, plan: body.plan ?? "starter" },
-    });
+      email,
+      String(body.plan ?? "starter").slice(0, 32),
+      Number(body.quota ?? 1000),
+      body.notes ? String(body.notes).slice(0, 2000) : null,
+    );
+    await db.run(
+      "insert into audit_events (id, actor, action, meta) values (?, 'public', 'business-interest', ?)",
+      newId(),
+      json({ organization, plan: body.plan ?? "starter" }),
+    );
     return Response.json({
       ok: true,
       message: "Request recorded. Business verification is provisioned manually — you will be contacted at the address supplied.",

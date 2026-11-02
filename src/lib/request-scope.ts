@@ -1,16 +1,14 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 
 /**
- * Per-request state for code deep in the call stack (the database client,
- * work that must finish after the response). AsyncLocalStorage is implemented
- * natively by the Workers runtime; it carries the scope through every await.
+ * Per-request state for code deep in the call stack (work that must finish
+ * after the response). AsyncLocalStorage is implemented natively by the
+ * Workers runtime; it carries the scope through every await.
+ * The D1 binding needs no per-request client: the runtime scopes it already.
  */
 
 export interface RequestScope {
   ctx: ExecutionContext;
-  /** This request's database client, opened on first use (src/db/index.ts). */
-  db?: NodePgDatabase;
 }
 
 const storage = new AsyncLocalStorage<RequestScope>();

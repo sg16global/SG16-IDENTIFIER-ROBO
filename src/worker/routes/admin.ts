@@ -1,7 +1,5 @@
-import { db } from "@/db";
+import { db, json } from "@/db";
 import { checkAdminAuth, storeAdminCodeHash, storedAdminCodeHash, temporaryAdminCode } from "@/lib/security/admin-access";
-import { sql } from "drizzle-orm";
-import { auditEvents, feedback, providerUsage } from "@/db/schema";
 import {
   FLAG_KEYS,
   adminStats,
@@ -39,14 +37,14 @@ function degradedStats() {
 function dbUnavailable(error: unknown) {
   console.error("[admin] database unavailable, action rejected:", error);
   return Response.json(
-    { ok: false, error: "Database unavailable (DATABASE_URL). This action needs Postgres; unlock and code rotation do not." },
+    { ok: false, error: "Database unavailable (D1 binding DB). This action needs D1; unlock and code rotation do not." },
     { status: 503 },
   );
 }
 
 async function auditBestEffort(action: string, meta: Record<string, unknown>) {
   try {
-    await db.insert(auditEvents).values({ id: newId(), actor: "admin", action, meta });
+    await db.run("insert into audit_events (id, actor, action, meta) values (?, ?, ?, ?)", newId(), "admin", action, json(meta));
   } catch {
     /* the audit trail needs the database; the action itself already happened */
   }
@@ -74,24 +72,28 @@ export async function GET(request: Request) {
   const headers = { "cache-control": "no-store" };
 
   try {
-    // Thunks + Promise.resolve().then: the db proxy throws synchronously on
-    // property access when DATABASE_URL is missing, and a sync throw while
-    // evaluating the array would leave the earlier promises unhandled.
+    // Thunks + Promise.resolve().then: a missing DB binding throws synchronously
+    // inside d1(), and a sync throw while evaluating the array would leave the
+    // earlier promises unhandled.
     const settle = <T>(fn: () => T | Promise<T>) => Promise.resolve().then(fn);
     const [stats, fb, audit, recentUsage] = await Promise.all([
       settle(() => adminStats()),
       settle(() => listFeedback()),
       settle(() => listRecentAudit(30)),
-      settle(() => db.select().from(providerUsage).orderBy(sql`created_at desc`).limit(40)),
+      settle(() =>
+        db.all(
+          `select id, provider, operation, status, latency_ms as latencyMs, cost_usd as costUsd,
+                  tokens_in as tokensIn, tokens_out as tokensOut, error, created_at as createdAt
+           from provider_usage order by created_at desc limit 40`,
+        ),
+      ),
     ]);
-    const spend = await db
-      .select({
-        total: sql<number>`coalesce(sum(cost_usd),0)::float`,
-        calls: sql<number>`count(*)::int`,
-        errors: sql<number>`coalesce(sum(case when status = 'error' then 1 else 0 end),0)::int`,
-      })
-      .from(providerUsage);
-    return Response.json({ ...base, dbAvailable: true, stats, feedback: fb, audit, recentUsage, spend: spend[0] }, { headers });
+    const spend = await db.first<{ total: number; calls: number; errors: number }>(
+      `select coalesce(sum(cost_usd), 0) as total, count(*) as calls,
+              coalesce(sum(case when status = 'error' then 1 else 0 end), 0) as errors
+       from provider_usage`,
+    );
+    return Response.json({ ...base, dbAvailable: true, stats, feedback: fb, audit, recentUsage, spend: spend ?? { total: 0, calls: 0, errors: 0 } }, { headers });
   } catch (error) {
     console.error("[admin] database unavailable, serving degraded console:", error);
     return Response.json(
@@ -170,7 +172,7 @@ export async function POST(request: Request) {
     const id = String(body.id ?? "");
     const status = String(body.status ?? "resolved");
     try {
-      await db.update(feedback).set({ status }).where(sql`${feedback.id} = ${id}`);
+      await db.run("update feedback set status = ? where id = ?", status, id);
     } catch (error) {
       return dbUnavailable(error);
     }
